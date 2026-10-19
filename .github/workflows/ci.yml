@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.toolchain }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # stable, and the oldest Rust Cargo.toml promises (rust-version).
+        toolchain: [stable, "1.93"]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust ${{ matrix.toolchain }}
+        run: |
+          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal --component rustfmt,clippy
+          rustup default "${{ matrix.toolchain }}"
+      - name: Format
+        if: matrix.toolchain == 'stable'
+        run: cargo fmt --check
+      - name: Clippy
+        if: matrix.toolchain == 'stable'
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      # The elisp tests run this binary.
+      - name: Upload the debug binary
+        if: matrix.toolchain == 'stable'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ement-e2ee-debug
+          path: target/debug/ement-e2ee
+          if-no-files-found: error
+          retention-days: 3
+
+  elisp:
+    name: Emacs ${{ matrix.emacs }}
+    needs: rust
+    strategy:
+      fail-fast: false
+      matrix:
+        # 28.1 is the minimum; take the last release of each major version.
+        emacs: ["28.2", "29.4", "30.2"]
+    runs-on: ubuntu-24.04
+    env:
+      # ement, plz and the linters go here, not into the runner's ~/.emacs.d.
+      PACKAGES: ${{ github.workspace }}/.elpa
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: purcell/setup-emacs@bdc64dc730ae1fcba200bfd52cb1b4cf6159cbe5 # v8.0
+        with:
+          version: ${{ matrix.emacs }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ement-e2ee-debug
+          path: bin
+      - name: Install ement, plz and package-lint
+        run: |
+          emacs -Q --batch --eval '
+            (progn
+              (setq package-user-dir (getenv "PACKAGES"))
+              (require (quote package))
+              (add-to-list (quote package-archives) (quote ("melpa" . "https://melpa.org/packages/")) t)
+              (package-initialize)
+              (package-refresh-contents)
+              (dolist (package (quote (ement plz package-lint)))
+                (package-install package)))'
+      - name: Byte-compile, warnings as errors
+        run: |
+          emacs -Q --batch -L . --eval '
+            (progn
+              (setq package-user-dir (getenv "PACKAGES"))
+              (package-initialize)
+              (setq byte-compile-error-on-warn t))' \
+            -f batch-byte-compile ement-e2ee.el
+      - name: Checkdoc
+        if: matrix.emacs == '30.2'
+        run: |
+          output=$(emacs -Q --batch -L . --eval '
+            (progn
+              (setq package-user-dir (getenv "PACKAGES"))
+              (package-initialize)
+              (require (quote checkdoc))
+              (let ((checkdoc-spellcheck-documentation-flag nil))
+                (checkdoc-file "ement-e2ee.el")
+                (checkdoc-file "test/ement-e2ee-test.el")))' 2>&1)
+          echo "$output"
+          ! echo "$output" | grep -q '\.el:[0-9]'
+      - name: package-lint
+        if: matrix.emacs == '30.2'
+        run: |
+          emacs -Q --batch -L . --eval '
+            (progn
+              (setq package-user-dir (getenv "PACKAGES"))
+              (require (quote package))
+              (add-to-list (quote package-archives) (quote ("melpa" . "https://melpa.org/packages/")) t)
+              (package-initialize)
+              (require (quote package-lint))
+              (setq package-lint-main-file "ement-e2ee.el"))' \
+            -f package-lint-batch-and-exit ement-e2ee.el
+      - name: ERT
+        run: |
+          # Artifacts lose the executable bit.
+          chmod +x bin/ement-e2ee
+          EMENT_E2EE_TEST_PROGRAM="$PWD/bin/ement-e2ee" emacs -Q --batch -L . --eval '
+            (progn
+              (setq package-user-dir (getenv "PACKAGES"))
+              (package-initialize))' \
+            -l test/ement-e2ee-test.el -f ert-run-tests-batch-and-exit
