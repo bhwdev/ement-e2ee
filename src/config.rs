@@ -98,6 +98,15 @@ fn passphrase_from_command(command: &str) -> anyhow::Result<String> {
     Ok(passphrase.to_owned())
 }
 
+/// The store directory: the command line's, else the config file's, else
+/// the platform default.
+fn resolve_store_dir(arg: Option<&Path>, file: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    arg.map(Path::to_owned)
+        .or(file.map(expand_tilde))
+        .or_else(|| dirs::data_dir().map(|d| d.join("ement-e2ee")))
+        .context("could not determine store directory")
+}
+
 impl Config {
     pub fn load(args: &ServeArgs) -> anyhow::Result<Self> {
         let file = FileConfig::read(args.config.as_deref())?;
@@ -107,12 +116,7 @@ impl Config {
         )?;
         let homeserver = parse_homeserver(&homeserver)?;
 
-        let store_dir = args
-            .store_dir
-            .clone()
-            .or(file.store_dir.map(expand_tilde))
-            .or_else(|| dirs::data_dir().map(|d| d.join("ement-e2ee")))
-            .context("could not determine store directory")?;
+        let store_dir = resolve_store_dir(args.store_dir.as_deref(), file.store_dir)?;
 
         let store_passphrase = match (file.store_passphrase, file.store_passphrase_command) {
             (Some(_), Some(_)) => {
@@ -167,6 +171,45 @@ impl AdminEndpoint {
         Ok(FileConfig::read(Some(config))?
             .listen
             .unwrap_or(DEFAULT_LISTEN))
+    }
+}
+
+/// What `ement-e2ee info` reports: where a proxy started with a config file
+/// would listen and keep its stores. Emacs reads it (it has no TOML reader),
+/// often, so it never runs `store_passphrase_command`.
+#[derive(Debug, serde::Serialize)]
+pub struct Info {
+    pub version: &'static str,
+    pub config_file: Option<PathBuf>,
+    pub config_exists: bool,
+    pub listen: SocketAddr,
+    /// The proxy's base URL: what ement's `:uri-prefix` should be.
+    pub url: String,
+    pub homeserver: Option<String>,
+    pub store_dir: PathBuf,
+}
+
+impl Info {
+    /// Unlike `serve`, a missing config file is not an error, explicit or
+    /// not: `config_exists` says so, and setup is what writes one.
+    pub fn load(config: Option<&Path>) -> anyhow::Result<Self> {
+        let config_file = config.map(Path::to_owned).or_else(default_config_path);
+        let config_exists = config_file.as_deref().is_some_and(Path::exists);
+        let file = if config_exists {
+            FileConfig::read(config_file.as_deref())?
+        } else {
+            FileConfig::default()
+        };
+        let listen = file.listen.unwrap_or(DEFAULT_LISTEN);
+        Ok(Self {
+            version: env!("CARGO_PKG_VERSION"),
+            config_file,
+            config_exists,
+            listen,
+            url: format!("http://{}", connect_addr(listen)),
+            homeserver: file.homeserver,
+            store_dir: resolve_store_dir(None, file.store_dir)?,
+        })
     }
 }
 
@@ -384,6 +427,54 @@ mod tests {
             connect_addr("192.168.1.5:8009".parse().unwrap()),
             "192.168.1.5:8009".parse().unwrap()
         );
+    }
+
+    #[test]
+    fn info_reads_the_file_without_running_the_passphrase_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let args = args_for(
+            &dir,
+            &format!(
+                r#"
+                listen = "0.0.0.0:9124"
+                homeserver = "https://matrix.example.org"
+                store_dir = "~/stores"
+                store_passphrase_command = "touch {}"
+                "#,
+                ran.display()
+            ),
+        );
+        let info = Info::load(args.config.as_deref()).unwrap();
+        assert!(!ran.exists(), "the passphrase command ran");
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(info.config_file, args.config);
+        assert!(info.config_exists);
+        assert_eq!(info.listen, "0.0.0.0:9124".parse().unwrap());
+        assert_eq!(info.url, "http://127.0.0.1:9124");
+        assert_eq!(
+            info.homeserver.as_deref(),
+            Some("https://matrix.example.org")
+        );
+        assert_eq!(info.store_dir, dirs::home_dir().unwrap().join("stores"));
+    }
+
+    #[test]
+    fn info_on_a_missing_config_reports_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-yet.toml");
+        let info = Info::load(Some(&path)).unwrap();
+        assert_eq!(info.config_file.as_deref(), Some(path.as_path()));
+        assert!(!info.config_exists);
+        assert_eq!(info.listen, DEFAULT_LISTEN);
+        assert_eq!(info.url, "http://127.0.0.1:8009");
+        assert_eq!(info.homeserver, None);
+        assert!(info.store_dir.ends_with("ement-e2ee"));
+
+        // A broken one is still an error.
+        std::fs::write(&path, "listen = ").unwrap();
+        let error = format!("{:#}", Info::load(Some(&path)).unwrap_err());
+        assert!(error.contains("invalid config"), "{error}");
     }
 
     #[test]

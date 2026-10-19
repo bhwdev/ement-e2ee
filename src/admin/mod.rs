@@ -22,8 +22,27 @@ fn json_error(status: StatusCode, message: impl std::fmt::Display) -> Response {
         .into_response()
 }
 
+/// Is this admin route open without the admin token? Only the one that
+/// says what is listening: Emacs probes it to tell this proxy from whatever
+/// else might hold the port, and does not know the token.
+fn is_public(method: &axum::http::Method, sub: &str) -> bool {
+    method == axum::http::Method::GET && sub.trim_end_matches('/') == "version"
+}
+
+fn version() -> Response {
+    Json(serde_json::json!({
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+    }))
+    .into_response()
+}
+
 /// Handle a request under /_ement/.
 pub async fn handle(state: &AppState, sub: &str, req: Request) -> Result<Response, ProxyError> {
+    if is_public(req.method(), sub) {
+        return Ok(version());
+    }
     if let Some(expected) = &state.config.admin_token {
         let ok = req
             .headers()
@@ -456,6 +475,23 @@ async fn bootstrap(state: &AppState, body: serde_json::Value) -> Result<Response
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_version_route_is_public() {
+        use axum::http::Method;
+        assert!(is_public(&Method::GET, "version"));
+        assert!(is_public(&Method::GET, "version/"));
+        for (method, sub) in [
+            (Method::POST, "version"),
+            (Method::GET, "status"),
+            (Method::GET, "versions"),
+            (Method::GET, "version/x"),
+            (Method::GET, "debug/version"),
+            (Method::GET, ""),
+        ] {
+            assert!(!is_public(&method, sub), "{method} {sub}");
+        }
+    }
 
     #[test]
     fn parse_query_takes_values_verbatim() {

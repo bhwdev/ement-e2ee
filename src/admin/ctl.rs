@@ -324,14 +324,34 @@ pub struct Client {
     base: String,
     http: reqwest::Client,
     admin_token: Option<String>,
+    connect_timeout: std::time::Duration,
 }
+
+/// How long to wait for the proxy to accept a connection. A proxy on
+/// loopback accepts at once; but where nothing listens, connecting may hang
+/// rather than fail (WSL2's mirrored networking does that), for as long as
+/// the kernel keeps trying. Requests themselves get no limit: a bootstrap
+/// that restores a large key backup takes its time.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Client {
     pub fn new(proxy: &str, admin_token: Option<String>) -> Self {
+        Self::with_connect_timeout(proxy, admin_token, CONNECT_TIMEOUT)
+    }
+
+    fn with_connect_timeout(
+        proxy: &str,
+        admin_token: Option<String>,
+        connect_timeout: std::time::Duration,
+    ) -> Self {
         Self {
             base: format!("{}/_ement", proxy.trim_end_matches('/')),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(connect_timeout)
+                .build()
+                .expect("failed to set up the HTTP client"),
             admin_token,
+            connect_timeout,
         }
     }
 
@@ -340,11 +360,19 @@ impl Client {
             Some(token) => request.bearer_auth(token),
             None => request,
         };
-        let resp = request.send().await.with_context(|| {
-            format!(
-                "could not reach the proxy at {} (is `ement-e2ee serve` running?)",
-                self.base.trim_end_matches("/_ement")
-            )
+        let proxy = self.base.trim_end_matches("/_ement");
+        let resp = request.send().await.map_err(|e| {
+            if e.is_connect() && e.is_timeout() {
+                anyhow::anyhow!(
+                    "could not reach the proxy at {proxy}: no connection within {:?} \
+                     (is `ement-e2ee serve` running, and listening there?)",
+                    self.connect_timeout
+                )
+            } else {
+                anyhow::Error::new(e).context(format!(
+                    "could not reach the proxy at {proxy} (is `ement-e2ee serve` running?)"
+                ))
+            }
         })?;
         let status = resp.status();
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -415,6 +443,39 @@ mod tests {
             common_body(&other_user_only),
             serde_json::json!({ "with_user": "@you:example.org" })
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn connecting_gives_up_in_time_and_says_so() {
+        // A listener whose accept queue is full: Linux drops further
+        // connection attempts, which then hang, like those to a port that
+        // WSL2's mirrored networking leaves unanswered.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(0).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut held = Vec::new();
+        while let Ok(stream) =
+            std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200))
+        {
+            held.push(stream);
+            assert!(held.len() < 100, "the accept queue never filled");
+        }
+
+        let timeout = std::time::Duration::from_millis(300);
+        let client = Client::with_connect_timeout(&format!("http://{address}"), None, timeout);
+        let started = std::time::Instant::now();
+        let error = format!("{:#}", client.get("status").await.unwrap_err());
+        assert!(
+            error.contains(&format!(
+                "could not reach the proxy at http://{address}: no connection within 300ms"
+            )),
+            "{error}"
+        );
+        assert!(error.contains("ement-e2ee serve"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        drop(listener);
     }
 
     #[test]

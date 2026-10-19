@@ -4,7 +4,7 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -27,24 +27,103 @@ struct Proxy {
     dir: tempfile::TempDir,
 }
 
+/// A config file for a proxy on `port` with its store in `store_dir`.
+fn write_config(path: &Path, port: u16, homeserver: &str, store_dir: &Path, extra: &str) {
+    std::fs::write(
+        path,
+        format!(
+            "listen = \"127.0.0.1:{port}\"\nhomeserver = \"{homeserver}\"\nstore_dir = \"{}\"\n{extra}\n",
+            store_dir.display()
+        ),
+    )
+    .unwrap();
+}
+
+/// A homeserver URL where nothing answers.
+fn offline_homeserver() -> String {
+    format!("http://127.0.0.1:{}", free_port())
+}
+
+/// Run `serve --config CONFIG`, expecting it to give up by itself;
+/// returns its exit status and standard error.
+fn serve_until_exit(config: &Path) -> (std::process::ExitStatus, String) {
+    let mut child = Command::new(BIN)
+        .args(["serve", "--config"])
+        .arg(config)
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("serve did not give up");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut error = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut error)
+        .unwrap();
+    (status, error)
+}
+
+/// GET `path` from 127.0.0.1:`port`; returns the status code and body.
+fn http_get(port: u16, path: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let status = response
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("not an HTTP response: {response}"));
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, body)
+}
+
 impl Proxy {
     /// Start with `homeserver` (a URL) and any further config lines.
     fn start(homeserver: &str, extra_config: &str) -> Self {
+        Self::start_with(homeserver, extra_config, &[])
+    }
+
+    /// Start with extra `serve` arguments too. Its standard input is a pipe
+    /// the test holds, like Emacs does.
+    fn start_with(homeserver: &str, extra_config: &str, serve_args: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let port = free_port();
         let config = dir.path().join("config.toml");
-        std::fs::write(
+        write_config(
             &config,
-            format!(
-                "listen = \"127.0.0.1:{port}\"\nhomeserver = \"{homeserver}\"\nstore_dir = \"{}\"\n{extra_config}\n",
-                dir.path().join("store").display()
-            ),
-        )
-        .unwrap();
+            port,
+            homeserver,
+            &dir.path().join("store"),
+            extra_config,
+        );
         let child = Command::new(BIN)
             .args(["serve", "--config"])
             .arg(&config)
+            .args(serve_args)
             .env_remove("RUST_LOG")
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -67,7 +146,7 @@ impl Proxy {
 
     /// Start with a homeserver URL where nothing answers.
     fn start_offline(extra_config: &str) -> Self {
-        Self::start(&format!("http://127.0.0.1:{}", free_port()), extra_config)
+        Self::start(&offline_homeserver(), extra_config)
     }
 
     /// Run `ement-e2ee ctl --config <this proxy's config> ARGS...`.
@@ -144,6 +223,215 @@ fn sigint_stops_the_proxy_cleanly() {
     let (status, log) = proxy.wait(Duration::from_secs(10));
     assert!(status.success(), "exit status: {status:?}\n{log}");
     assert!(log.contains("interrupted; shutting down"), "{log}");
+}
+
+#[test]
+fn sighup_stops_the_proxy_cleanly() {
+    // What Emacs sends its subprocesses when it exits.
+    let proxy = Proxy::start_offline("");
+    proxy.signal("-HUP");
+    let (status, log) = proxy.wait(Duration::from_secs(10));
+    assert!(status.success(), "exit status: {status:?}\n{log}");
+    assert!(log.contains("hung up; shutting down"), "{log}");
+}
+
+#[test]
+fn closing_stdin_stops_the_proxy() {
+    // Emacs gone without a signal (SIGKILL, a crash): its end of the pipe
+    // closes all the same.
+    let mut proxy = Proxy::start_with(&offline_homeserver(), "", &["--exit-on-stdin-close"]);
+    // Writing to it changes nothing.
+    let mut stdin = proxy.child.stdin.take().unwrap();
+    stdin.write_all(b"anything\n").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(proxy.child.try_wait().unwrap().is_none(), "exited early");
+    drop(stdin);
+    let (status, log) = proxy.wait(Duration::from_secs(10));
+    assert!(status.success(), "exit status: {status:?}\n{log}");
+    assert!(
+        log.contains("standard input closed; shutting down"),
+        "{log}"
+    );
+}
+
+#[test]
+fn closing_stdin_means_nothing_without_the_flag() {
+    let mut proxy = Proxy::start_offline("");
+    drop(proxy.child.stdin.take());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(proxy.child.try_wait().unwrap().is_none(), "exited");
+    proxy.signal("-TERM");
+    let (status, _) = proxy.wait(Duration::from_secs(10));
+    assert!(status.success());
+}
+
+#[test]
+fn second_proxy_on_the_same_store_is_refused() {
+    let proxy = Proxy::start_offline("");
+    // Another port, the same store directory.
+    let port = free_port();
+    let config = proxy.dir.path().join("second.toml");
+    write_config(
+        &config,
+        port,
+        &offline_homeserver(),
+        &proxy.dir.path().join("store"),
+        "",
+    );
+    let (status, error) = serve_until_exit(&config);
+    assert!(!status.success());
+    assert!(
+        error.contains(&format!(
+            "in use by another ement-e2ee (pid {})",
+            proxy.child.id()
+        )),
+        "{error}"
+    );
+    // It gave up before binding its port.
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    // The first one is unharmed.
+    assert_eq!(http_get(proxy.port, "/_ement/version").0, 200);
+}
+
+#[test]
+fn newer_store_marker_refuses_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join(".version"), "999.0.0\n").unwrap();
+    let port = free_port();
+    let config = dir.path().join("config.toml");
+    write_config(&config, port, &offline_homeserver(), &store, "");
+    let (status, error) = serve_until_exit(&config);
+    assert!(!status.success());
+    assert!(
+        error.contains(&format!(
+            "store was last used by ement-e2ee 999.0.0, newer than this {}",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{error}"
+    );
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    // An older marker is raised to this version.
+    std::fs::write(store.join(".version"), "0.0.1\n").unwrap();
+    let marker = {
+        let mut child = Command::new(BIN)
+            .args(["serve", "--config"])
+            .arg(&config)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(Instant::now() < deadline, "did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let marker = std::fs::read_to_string(store.join(".version")).unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        marker
+    };
+    assert_eq!(marker.trim(), env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn newer_crypto_store_schema_refuses_to_start() {
+    // A store a newer matrix-sdk-sqlite has migrated, from before the
+    // version marker existed: only its own schema version tells.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let device = store.join("@me:example.org/DEVICE");
+    std::fs::create_dir_all(&device).unwrap();
+    let database = rusqlite::Connection::open(device.join("matrix-sdk-crypto.sqlite3")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value BLOB NOT NULL);
+             INSERT INTO kv VALUES ('version', x'63');",
+        )
+        .unwrap();
+    drop(database);
+    let port = free_port();
+    let config = dir.path().join("config.toml");
+    write_config(&config, port, &offline_homeserver(), &store, "");
+    let (status, error) = serve_until_exit(&config);
+    assert!(!status.success());
+    assert!(
+        error.contains("has schema version 99, newer than"),
+        "{error}"
+    );
+    assert!(error.contains("@me:example.org/DEVICE"), "{error}");
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+}
+
+#[test]
+fn version_route_needs_no_token() {
+    let proxy = Proxy::start_offline("admin_token = \"s3cret\"");
+    let (status, body) = http_get(proxy.port, "/_ement/version");
+    assert_eq!(status, 200, "{body}");
+    let version: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(version["name"], "ement-e2ee");
+    assert_eq!(version["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(version["pid"], proxy.child.id());
+    // Everything else still needs the token.
+    assert_eq!(http_get(proxy.port, "/_ement/status").0, 401);
+}
+
+#[test]
+fn info_json_reports_the_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let config = dir.path().join("config.toml");
+    write_config(
+        &config,
+        9125,
+        "https://matrix.example.org",
+        &dir.path().join("store"),
+        &format!("store_passphrase_command = \"touch {}\"", ran.display()),
+    );
+    let info = |config: &Path| {
+        let output = Command::new(BIN)
+            .args(["info", "--json", "--config"])
+            .arg(config)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        serde_json::from_str::<serde_json::Value>(&stdout(&output)).unwrap()
+    };
+    let json = info(&config);
+    assert!(!ran.exists(), "info ran the passphrase command");
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(json["config_file"], config.to_str().unwrap());
+    assert_eq!(json["config_exists"], true);
+    assert_eq!(json["listen"], "127.0.0.1:9125");
+    assert_eq!(json["url"], "http://127.0.0.1:9125");
+    assert_eq!(json["homeserver"], "https://matrix.example.org");
+    assert_eq!(
+        json["store_dir"],
+        dir.path().join("store").to_str().unwrap()
+    );
+
+    // No config yet: what setup would start from.
+    let json = info(&dir.path().join("missing.toml"));
+    assert_eq!(json["config_exists"], false);
+    assert_eq!(json["homeserver"], serde_json::Value::Null);
+    assert_eq!(json["url"], "http://127.0.0.1:8009");
+
+    // Without --json, for people.
+    let output = Command::new(BIN)
+        .args(["info", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    let text = stdout(&output);
+    assert!(
+        text.contains("url         http://127.0.0.1:9125\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("homeserver  https://matrix.example.org\n"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -376,7 +664,7 @@ fn setup_writes_the_config_and_prints_the_snippet() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ement-e2ee/config.toml");
     let output = Command::new(BIN)
-        .args(["setup", "--user-id", "@ben:example.org", "--no-service"])
+        .args(["setup", "--user-id", "@ben:example.org"])
         .args([
             "--homeserver",
             &homeserver,
@@ -400,6 +688,7 @@ fn setup_writes_the_config_and_prints_the_snippet() {
         "{text}"
     );
     assert!(text.contains("ement-e2ee ctl bootstrap"), "{text}");
+    assert!(text.contains("M-x ement-e2ee-install"), "{text}");
 
     let written = std::fs::read_to_string(&config).unwrap();
     assert!(written.contains("listen = \"127.0.0.1:9123\""), "{written}");
@@ -410,7 +699,7 @@ fn setup_writes_the_config_and_prints_the_snippet() {
 
     // Without a user ID or homeserver it has to ask, and says so if it cannot.
     let output = Command::new(BIN)
-        .args(["setup", "--no-service", "--config"])
+        .args(["setup", "--config"])
         .arg(dir.path().join("other.toml"))
         .stdin(Stdio::null())
         .output()

@@ -1,6 +1,7 @@
-//! `ement-e2ee setup`: go from an installed binary to a running proxy.
-//! Finds the homeserver, writes the config, installs the systemd user
-//! service, and prints what to evaluate in Emacs.
+//! `ement-e2ee setup`: go from an installed binary to a working config.
+//! Finds the homeserver, writes the config, and prints how to run the proxy
+//! and connect ement through it. (ement-e2ee.el runs it for you, from
+//! `M-x ement-e2ee-install`, and then runs the proxy itself.)
 
 use std::io::Write as _;
 use std::net::SocketAddr;
@@ -11,8 +12,6 @@ use anyhow::Context as _;
 use reqwest::Url;
 
 use crate::config::{self, DEFAULT_LISTEN};
-
-const UNIT_NAME: &str = "ement-e2ee.service";
 
 #[derive(clap::Args)]
 pub struct SetupArgs {
@@ -32,12 +31,6 @@ pub struct SetupArgs {
     /// Replace an existing config file.
     #[arg(long)]
     force: bool,
-    /// Do not install or start the systemd user service.
-    #[arg(long)]
-    no_service: bool,
-    /// Install and start the service without asking first.
-    #[arg(long)]
-    yes: bool,
 }
 
 pub async fn run(args: SetupArgs) -> anyhow::Result<()> {
@@ -86,22 +79,19 @@ pub async fn run(args: SetupArgs) -> anyhow::Result<()> {
         args.listen
     };
 
-    let custom_config = args.config.as_deref();
-    if args.no_service {
-        println!(
-            "\nStart the proxy with:\n\n  {}",
-            serve_command(custom_config)?
-        );
-    } else {
-        install_service(&http, custom_config, listen, args.yes).await?;
-    }
-
     println!(
-        "\nConnect ement through the proxy by evaluating this in Emacs:\n\n{}\n",
+        "\nWith the Emacs package ement-e2ee.el, `M-x ement-e2ee-install` takes it from \
+         here: it runs the proxy and routes `M-x ement-connect` through it."
+    );
+    println!(
+        "\nWithout it, start the proxy with:\n\n  {}\n\n\
+         and connect ement through it by evaluating this in Emacs:\n\n{}\n",
+        serve_command(args.config.as_deref())?,
         elisp_snippet(user_id.as_deref(), listen)
     );
     println!(
-        "Once ement is connected, join your encrypted identity and verify the device:\n\n  \
+        "Once ement is connected, join your encrypted identity and verify the device \
+         (M-x ement-e2ee-bootstrap and M-x ement-e2ee-verify, or):\n\n  \
          ement-e2ee ctl bootstrap\n  ement-e2ee ctl verify\n\n\
          `ement-e2ee ctl debug check` shows whether everything is in order."
     );
@@ -228,11 +218,10 @@ fn exe_path() -> anyhow::Result<PathBuf> {
 
 /// The command line that starts the proxy with this setup's config.
 fn serve_command(custom_config: Option<&Path>) -> anyhow::Result<String> {
-    Ok(exec_start(&exe_path()?, custom_config))
+    Ok(render_serve_command(&exe_path()?, custom_config))
 }
 
-fn exec_start(exe: &Path, custom_config: Option<&Path>) -> String {
-    // systemd and shells both understand double-quoted words.
+fn render_serve_command(exe: &Path, custom_config: Option<&Path>) -> String {
     let quote = |path: &Path| {
         let text = path.display().to_string();
         if text.contains(char::is_whitespace) {
@@ -247,110 +236,12 @@ fn exec_start(exe: &Path, custom_config: Option<&Path>) -> String {
     }
 }
 
-pub fn render_unit(exe: &Path, custom_config: Option<&Path>) -> String {
-    format!(
-        "# systemd user unit (written by `ement-e2ee setup`)\n\
-         [Unit]\n\
-         Description=Transparent E2EE proxy for ement.el\n\
-         After=network-online.target\n\
-         \n\
-         [Service]\n\
-         ExecStart={}\n\
-         Restart=on-failure\n\
-         RestartSec=5\n\
-         \n\
-         [Install]\n\
-         WantedBy=default.target\n",
-        exec_start(exe, custom_config)
-    )
-}
-
 /// What to evaluate in Emacs. ement asks for the password itself.
 pub fn elisp_snippet(user_id: Option<&str>, listen: SocketAddr) -> String {
     format!(
         "  (ement-connect :user-id \"{}\"\n                 :uri-prefix \"http://{}\")",
         user_id.unwrap_or("@you:example.org"),
         config::connect_addr(listen)
-    )
-}
-
-fn systemctl(args: &[&str]) -> anyhow::Result<bool> {
-    let status = std::process::Command::new("systemctl")
-        .arg("--user")
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match status {
-        Ok(status) => Ok(status.success()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e).context("failed to run systemctl"),
-    }
-}
-
-async fn install_service(
-    http: &reqwest::Client,
-    custom_config: Option<&Path>,
-    listen: SocketAddr,
-    assume_yes: bool,
-) -> anyhow::Result<()> {
-    let serve = serve_command(custom_config)?;
-    if !systemctl(&["show-environment"])? {
-        println!(
-            "\nNo systemd user session here, so no service was installed. Start the proxy with:\n\n  \
-             {serve}\n\n\
-             (On WSL2, systemd is enabled with `[boot] systemd=true` in /etc/wsl.conf \
-             followed by `wsl.exe --shutdown`.)"
-        );
-        return Ok(());
-    }
-    if !assume_yes {
-        let answer = prompt("\nInstall and start the systemd user service? [Y/n] ")?;
-        if matches!(answer.to_lowercase().as_str(), "n" | "no") {
-            println!("Skipped. Start the proxy with:\n\n  {serve}");
-            return Ok(());
-        }
-    }
-
-    let unit_path = dirs::config_dir()
-        .context("could not determine the config directory")?
-        .join("systemd/user")
-        .join(UNIT_NAME);
-    if let Some(parent) = unit_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&unit_path, render_unit(&exe_path()?, custom_config))
-        .with_context(|| format!("failed to write {}", unit_path.display()))?;
-    println!("Wrote {}", unit_path.display());
-
-    for args in [
-        &["daemon-reload"][..],
-        &["enable", UNIT_NAME],
-        // restart rather than start: pick up a config that was just rewritten.
-        &["restart", UNIT_NAME],
-    ] {
-        anyhow::ensure!(
-            systemctl(args)?,
-            "`systemctl --user {}` failed; see `journalctl --user -u {UNIT_NAME}`",
-            args.join(" ")
-        );
-    }
-
-    // Do not claim success before the proxy actually answers.
-    let status_url = format!(
-        "http://{}/_matrix/client/versions",
-        config::connect_addr(listen)
-    );
-    for _ in 0..50 {
-        if http.get(&status_url).send().await.is_ok() {
-            println!("The proxy is running (logs: journalctl --user -u {UNIT_NAME} -f).");
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    anyhow::bail!(
-        "the service was started but the proxy does not answer on {listen}; \
-         see `journalctl --user -u {UNIT_NAME}`"
     )
 }
 
@@ -401,19 +292,18 @@ mod tests {
     }
 
     #[test]
-    fn unit_runs_this_binary_with_this_config() {
-        let unit = render_unit(Path::new("/home/me/.cargo/bin/ement-e2ee"), None);
-        assert!(unit.contains("\nExecStart=/home/me/.cargo/bin/ement-e2ee serve\n"));
-        assert!(unit.contains("[Install]\nWantedBy=default.target"));
-        assert!(unit.contains("Restart=on-failure"));
-
-        let unit = render_unit(
-            Path::new("/opt/my tools/ement-e2ee"),
-            Some(Path::new("/etc/ement e2ee.toml")),
+    fn serve_command_runs_this_binary_with_this_config() {
+        assert_eq!(
+            render_serve_command(Path::new("/home/me/.cargo/bin/ement-e2ee"), None),
+            "/home/me/.cargo/bin/ement-e2ee serve"
         );
-        assert!(unit.contains(
-            "ExecStart=\"/opt/my tools/ement-e2ee\" serve --config \"/etc/ement e2ee.toml\"\n"
-        ));
+        assert_eq!(
+            render_serve_command(
+                Path::new("/opt/my tools/ement-e2ee"),
+                Some(Path::new("/etc/ement e2ee.toml")),
+            ),
+            "\"/opt/my tools/ement-e2ee\" serve --config \"/etc/ement e2ee.toml\""
+        );
     }
 
     #[test]
@@ -499,7 +389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_without_service_writes_a_working_config() {
+    async fn setup_writes_a_working_config() {
         let homeserver = FakeHomeserver::start().await;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -509,8 +399,6 @@ mod tests {
             listen: "127.0.0.1:9002".parse().unwrap(),
             config: Some(path.clone()),
             force,
-            no_service: true,
-            yes: false,
         };
         run(args(false)).await.unwrap();
         let written = std::fs::read_to_string(&path).unwrap();

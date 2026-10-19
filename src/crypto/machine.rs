@@ -39,6 +39,8 @@ pub async fn open_machine(
     device_id: &DeviceId,
 ) -> anyhow::Result<OlmMachine> {
     let dir = account_store_dir(config, user_id, device_id);
+    // `serve` checked the stores that were there when it started.
+    crate::store_guard::check_crypto_store_schema(&dir)?;
     let store = SqliteCryptoStore::open(&dir, config.store_passphrase.as_deref())
         .await
         .with_context(|| format!("failed to open crypto store at {}", dir.display()))?;

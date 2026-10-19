@@ -26,7 +26,7 @@ use crate::session::{AccountContext, sanitize_for_path};
 use crate::upstream::Upstream;
 
 /// The crypto store's database, as matrix-sdk-sqlite names it.
-const STORE_FILE: &str = "matrix-sdk-crypto.sqlite3";
+pub const STORE_FILE: &str = "matrix-sdk-crypto.sqlite3";
 
 /// In a device's store directory: which device ID the client asks for at
 /// login when it means this device.
