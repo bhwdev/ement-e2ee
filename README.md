@@ -9,6 +9,11 @@ README, built on the official
 the same crypto core Element uses) instead of the deprecated libolm
 (which pantalaimon was based on).
 
+The Emacs package `ement-e2ee.el`, in this repository, installs the proxy,
+runs it while ement needs it and routes ement through it: after
+`M-x ement-e2ee-install`, `M-x ement-connect` works as before, with
+encryption.
+
 ```
 Emacs / ement.el  ──plain HTTP──▶  ement-e2ee (localhost)  ──HTTPS──▶  homeserver
                                    · decrypts m.room.encrypted in sync/history
@@ -17,7 +22,7 @@ Emacs / ement.el  ──plain HTTP──▶  ement-e2ee (localhost)  ──HTTPS
                                    · SSSS recovery, cross-signing, key backup
                                    · encrypted attachments
 ```
-    
+
 ## Features
 
 - **Receive**: decrypts `m.room.encrypted` events in `/sync`, `/messages`,
@@ -27,45 +32,148 @@ Emacs / ement.el  ──plain HTTP──▶  ement-e2ee (localhost)  ──HTTPS
 - **Send**: transparently encrypts everything sent into encrypted rooms
   (messages, edits, reactions), including establishing olm sessions and
   sharing megolm keys with full (not lazy-loaded) room membership.
-- **Join your existing identity**: `ctl bootstrap` takes your recovery key or
-  passphrase, imports your cross-signing keys from SSSS, signs this device
-  (green shield in Element), and restores your history keys from server-side
-  key backup. New room keys are backed up automatically afterwards.
+- **Join your existing identity**: `M-x ement-e2ee-bootstrap` (or
+  `ctl bootstrap`) takes your recovery key or passphrase, imports your
+  cross-signing keys from SSSS, signs this device (green shield in Element),
+  and restores your history keys from server-side key backup. New room keys
+  are backed up automatically afterwards.
 - **Verification**: emoji (SAS) verification against your other devices via
-  `ctl verify`, which asks one question: do the emoji match?
-- **Diagnostics**: `ctl debug check` tests the whole chain and names the
-  remedy for each problem; further subcommands look into a room, an event,
-  the device lists or the logs.
+  `M-x ement-e2ee-verify` (`ctl verify`), which asks one question: do the
+  emoji match?
+- **Diagnostics**: `M-x ement-e2ee-check` (`ctl debug check`) tests the
+  whole chain and names the remedy for each problem; further subcommands look
+  into a room, an event, the device lists or the logs.
 - **Media**: uploads are encrypted (spec `EncryptedFile`/AES-CTR), downloads
   decrypted on the fly — including ement's tokenless avatar fetches. Media
   sent to unencrypted rooms is re-uploaded as plaintext automatically.
 - **Multi-account**: sessions are keyed by access token; each gets its own
   sqlite crypto store under `~/.local/share/ement-e2ee/`.
 
-## Build
+## Install
 
-Requires Rust ≥ 1.93 (`rustup` recommended). All dependencies, including the
+### The Emacs package
+
+Install it from Git, with whichever package manager you use (it needs Emacs
+28.1 or newer, ement 0.16 or newer, and plz):
+
+```elisp
+;; package-vc (Emacs 29+)
+(package-vc-install "https://github.com/bhw-foss/ement-e2ee")
+;; or, Emacs 30+:
+(use-package ement-e2ee
+  :vc (:url "https://github.com/bhw-foss/ement-e2ee"))
+
+;; straight.el
+(straight-use-package '(ement-e2ee :host github :repo "bhw-foss/ement-e2ee"))
+
+;; elpaca
+(elpaca (ement-e2ee :host github :repo "bhw-foss/ement-e2ee"))
+```
+
+Then, once:
+
+```
+M-x ement-e2ee-install
+```
+
+It
+
+1. gets the proxy binary, after asking how: **download** the release's
+   prebuilt binary (static Linux x86_64 and aarch64, Apple Silicon macOS),
+   checked against the release's `SHA256SUMS` before it is used; or **build**
+   it with `cargo install --locked` (Rust ≥ 1.93), from the package's own
+   checkout when its version matches. It goes to `ement-e2ee/VERSION/bin/`
+   under `user-emacs-directory` (`ement-e2ee-binary-directory`). A new
+   enough `ement-e2ee` on `exec-path`, or `ement-e2ee-program`, is used
+   instead;
+2. asks for your Matrix user ID and writes the proxy's config, unless there
+   is one (`ement-e2ee setup`, below);
+3. turns on `ement-e2ee-mode`, and offers to keep it on in future sessions
+   (with Customize). With use-package, `:config (ement-e2ee-mode)` does the
+   same.
+
+Then `M-x ement-connect`, as usual. Once connected, join your encrypted
+identity with `M-x ement-e2ee-bootstrap` (it asks for the recovery key) and,
+optionally, verify the device with `M-x ement-e2ee-verify`; after the first
+sync, a device that is not cross-signed yet gets a hint to do so.
+
+The prebuilt binaries carry a build-provenance attestation, which ties them
+to the release workflow run that built them:
+
+```sh
+gh attestation verify ement-e2ee-x86_64-unknown-linux-musl -R bhw-foss/ement-e2ee
+```
+
+Elsewhere (Intel macOS, other Unix systems) `ement-e2ee-install` offers the
+cargo build only. Native Windows is not supported; WSL is.
+
+### What the mode does
+
+- `ement-connect` starts the proxy when an account it routes needs it
+  (`ement-e2ee-accounts`: all, or a list of user IDs), points the session at
+  it (also a session ement saved earlier) and waits until it answers. A
+  missing binary or config is dealt with first, as `ement-e2ee-auto-install`
+  says (ask, by default).
+- The proxy runs as a subprocess of Emacs, its output in the `*ement-e2ee*`
+  buffer (`M-x ement-e2ee-log`). When it dies, Emacs restarts it, backing off
+  (1 s, 2 s, 4 s, … at most 60 s), and resumes ement's syncs, which ement
+  itself gives up after a failed connection. After four failed starts in a
+  row it stops trying and shows a warning with the proxy's last words.
+- When the last session using it disconnects, the proxy is stopped
+  (`ement-e2ee-stop-on-disconnect`). When Emacs exits, however it exits, the
+  proxy follows: on SIGHUP, or when its standard input, a pipe from Emacs,
+  reaches end of file.
+- A proxy already running on the configured port (from another Emacs, or
+  started by hand) is used rather than a second one started, and replaced
+  when it disappears. Only a proxy this Emacs started is stopped
+  automatically.
+- Turning the mode off leaves a running proxy alone; ement's saved sessions
+  keep pointing at it.
+
+Commands:
+
+| Command                             | What it does                                                           |
+|-------------------------------------|------------------------------------------------------------------------|
+| `ement-e2ee-install`                | get the binary and config, turn the mode on (`C-u`: fetch the binary again) |
+| `ement-e2ee-setup`                  | write the config afresh, for another account or homeserver           |
+| `ement-e2ee-bootstrap`              | join your encrypted identity with the recovery key                    |
+| `ement-e2ee-verify`                 | emoji-verify against another device, in a comint buffer               |
+| `ement-e2ee-check`                  | `ctl debug check`: what is wrong, and the remedy                      |
+| `ement-e2ee-status`                 | `ctl status`: sessions, cross-signing, key backup                     |
+| `ement-e2ee-log`                    | the proxy's log                                                       |
+| `ement-e2ee-start`, `-stop`, `-restart` | by hand                                                          |
+| `ement-e2ee-delete-old-binaries`    | remove binaries of older versions                                     |
+
+Settings are in `M-x customize-group RET ement-e2ee`; among them
+`ement-e2ee-config-file` (another config file), `ement-e2ee-serve-arguments`
+(e.g. `("--log-level" "debug")`) and `ement-e2ee-startup-timeout`. One proxy
+serves one homeserver: route only accounts on the homeserver in its config.
+
+### Without Emacs's help
+
+Build and install the binary by hand (Rust ≥ 1.93, `rustup` recommended). All
+dependencies, including the
 [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk) crates, are
 released versions from crates.io, locked by `Cargo.lock`.
 
 ```sh
-cargo build --release
-cargo install --path .   # puts ement-e2ee on ~/.cargo/bin
+cargo install --locked --path .   # puts ement-e2ee on ~/.cargo/bin
 ```
 
-## Setup
+Then
 
 ```sh
-ement-e2ee setup --user-id @you:example.org # See subsection "By hand" below to see what it does
+ement-e2ee setup --user-id @you:example.org
 ```
 
 finds your homeserver (via `.well-known`), writes
 `~/.config/ement-e2ee/config.toml`, and prints how to start the proxy and the
-`ement-connect` form to evaluate in Emacs (M-x 'ielm'). `--homeserver URL`
-skips discovery, and an existing config is kept unless `--force` is given. Then, with
-ement connected:
+`ement-connect` form to evaluate in Emacs. `--homeserver URL` skips
+discovery, and an existing config is kept unless `--force` is given. Then run
+the proxy, connect ement through it and, with ement connected:
 
 ```sh
+ement-e2ee serve             # in a terminal of its own
 ement-e2ee ctl bootstrap     # join your encrypted identity (asks for the recovery key)
 ement-e2ee ctl verify        # optional: emoji-verify against another device
 ement-e2ee ctl debug check   # is everything in order?
@@ -81,32 +189,23 @@ itself with `--device DEVICEID`. It shows the emoji, asks whether the other
 device shows the same, and reports the result. Keep ement connected while it
 runs.
 
-### By hand
+To write the config by hand instead of with `setup`:
 
-1. Configure:
+```sh
+mkdir -p ~/.config/ement-e2ee
+cp config.example.toml ~/.config/ement-e2ee/config.toml
+$EDITOR ~/.config/ement-e2ee/config.toml   # set homeserver
+```
 
-   ```sh
-   mkdir -p ~/.config/ement-e2ee
-   cp config.example.toml ~/.config/ement-e2ee/config.toml
-   $EDITOR ~/.config/ement-e2ee/config.toml   # set homeserver
-   ```
+and connect with
 
-2. Run the proxy:
+```elisp
+(ement-connect :user-id "@you:example.org"
+               :uri-prefix "http://localhost:8009")
+```
 
-   ```sh
-   ement-e2ee serve
-   ```
-
-3. Connect ement through it:
-
-   ```elisp
-   (ement-connect :user-id "@you:example.org"
-                  :password "yourpass"
-                  :uri-prefix "http://localhost:8009")
-   ```
-
-   On first sync the proxy registers device keys for ement's device; it shows
-   up in Element → Settings → Sessions.
+On first sync the proxy registers device keys for ement's device; it shows
+up in Element → Settings → Sessions.
 
 ## Configuration
 
@@ -120,12 +219,17 @@ runs.
   for a non-default one).
 - `store_dir` — a leading `~` is expanded.
 
-The proxy shuts down cleanly on SIGINT, SIGTERM and SIGHUP, giving requests
-in flight three seconds to finish.
+`ement-e2ee info [--json]` shows what a proxy started with the config would
+use: the listen address and URL, the homeserver, the store directory.
+
+The proxy shuts down cleanly on SIGINT, SIGTERM and SIGHUP, and, with
+`serve --exit-on-stdin-close` (as Emacs runs it), when its standard input
+reaches end of file; requests in flight get three seconds to finish.
 
 ## Admin CLI
 
 ```
+ement-e2ee info [--json]
 ement-e2ee ctl status
 ement-e2ee ctl bootstrap [--recovery-key-file FILE]
 ement-e2ee ctl verify [--device DEVICEID] [--timeout SECS]
@@ -137,11 +241,13 @@ ement-e2ee ctl debug check|session|devices|room|event|logs|log-level|report
 
 The CLI talks to `/_ement/*` on the proxy's listen address, which it takes
 from the config file (`--proxy URL` overrides it). The `verify` subcommands
-perform single steps of a flow, for scripting.
+perform single steps of a flow, for scripting. `GET /_ement/version` (name,
+version and process ID) is the one route open without `admin_token`: it is
+how Emacs tells the proxy from anything else on the port.
 
 ## Debugging
 
-Start with `ement-e2ee ctl debug check`. It tests the homeserver connection,
+Start with `M-x ement-e2ee-check` (`ement-e2ee ctl debug check`). It tests the homeserver connection,
 the clock, the access token, the published device keys and one-time keys,
 cross-signing, the key backup, whether ement is syncing and the messages
 still waiting for keys, and prints what to do about each problem; it exits non-zero
@@ -228,6 +334,15 @@ store directory, connect again.
 - `login.json` — the device ID ement asks for at login, where the proxy chose
   another: how the next login finds this device again.
 
+The store directory itself holds `.lock`, which keeps a second proxy (on
+another port, say) from using the same stores while one runs, and
+`.version`, the newest ement-e2ee that has used it: an older one refuses to
+start there, since it cannot read what a newer one may have migrated. It
+says which version to install; delete `.version` only if you are certain.
+Each crypto store's own schema version is checked as well (stores from
+before `.version` existed have only that): a store migrated by a newer
+matrix-sdk-sqlite than the proxy's is refused.
+
 Deleting a store directory starts a new device with the next login (see
 [Devices](#devices)); it does not repair the old one. The room keys in it are
 gone too, except for those the key backup brings back with `ctl bootstrap`.
@@ -237,7 +352,7 @@ Prefer keeping it; back it up if you care.
 
 ```sh
 cargo test          # unit tests plus end-to-end tests (see below)
-cargo +1.93 test --locked   # oldest Rust that Build promises
+cargo +1.93 test --locked   # oldest Rust that Install promises
 cargo run -- serve --homeserver https://matrix.org --log-level debug
 curl http://127.0.0.1:8009/_matrix/client/versions   # smoke test
 ```
@@ -249,5 +364,49 @@ decryption, media, key export/import, placeholder repair, device IDs across
 logins, sign-outs and deleted stores, `ctl bootstrap` (SSSS, cross-signing,
 backup restore), `ctl verify` (SAS, interactive and step by step) and
 `ctl debug`. `tests/process.rs` runs the built binary:
-signals, exit codes, `ctl` against a live proxy, `setup`. None of it needs a
-network or an account.
+signals and end of file on standard input, exit codes, the store lock and
+version marker, `ctl` against a live proxy, `info`, `setup`. None of it needs
+a network or an account.
+
+The Emacs package's tests (`test/ement-e2ee-test.el`, ERT) run in batch
+mode with ement, plz and ement's other dependencies on the `load-path`; the
+ones that start a real proxy need `EMENT_E2EE_TEST_PROGRAM`:
+
+```sh
+cargo build
+EMENT_E2EE_TEST_PROGRAM=target/debug/ement-e2ee \
+  emacs -Q --batch -L . -L PATH/TO/ement -L PATH/TO/plz ... \
+  -l test/ement-e2ee-test.el -f ert-run-tests-batch-and-exit
+```
+
+CI (`.github/workflows/ci.yml`) runs `cargo fmt`, clippy and the tests on
+stable and on Rust 1.93; then it byte-compiles the package with warnings as
+errors and runs the ERT tests on Emacs 28.2, 29.4 and 30.2, and checkdoc and
+package-lint on 30.2.
+
+## Releasing
+
+The version follows
+[matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk/releases)'s:
+ement-e2ee 0.18.x is built on matrix-sdk-crypto 0.18.
+
+1. In one commit, set the same version in `Cargo.toml` (`version`, then
+   `cargo build` to update `Cargo.lock`), in `ement-e2ee.el`'s
+   `;; Version:` header and in its `ement-e2ee-binary-version`.
+2. Tag that commit `vX.Y.Z` and push the tag. The release workflow
+   (`.github/workflows/release.yml`) checks that the three versions and the
+   tag agree, runs the tests, builds the binaries, writes `SHA256SUMS`,
+   attests the binaries' provenance and publishes the GitHub release.
+   Pushing the tag is the only manual step. Run the workflow by hand with
+   `dry_run` to build the binaries as workflow artifacts, without a release.
+
+Whoever installs the package from Git (package-vc, straight, elpaca, MELPA
+unstable) follows the main branch, so the elisp there must always work with
+the binary its `ement-e2ee-binary-version` names: raise it only in a release
+commit. MELPA takes the recipe
+`(ement-e2ee :fetcher github :repo "bhw-foss/ement-e2ee" :files ("ement-e2ee.el"))`.
+
+## Licence
+
+GPL-3.0-or-later, for the whole repository: the Rust proxy and the Emacs
+package alike. See [COPYING](COPYING).
