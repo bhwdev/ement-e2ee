@@ -208,7 +208,7 @@ fn stderr(output: &Output) -> String {
 
 #[test]
 fn sigterm_stops_the_proxy_cleanly() {
-    // What `systemctl stop` sends.
+    // How ement-e2ee.el stops it.
     let proxy = Proxy::start_offline("");
     proxy.signal("-TERM");
     let (status, log) = proxy.wait(Duration::from_secs(10));
@@ -460,7 +460,7 @@ fn shutdown_does_not_wait_for_hung_requests() {
     let (status, log) = proxy.wait(Duration::from_secs(15));
     assert!(status.success(), "exit status: {status:?}\n{log}");
     assert!(log.contains("closing remaining connections"), "{log}");
-    // It gave the request a moment, but not systemd's whole stop timeout.
+    // It gave the request a moment, but not its whole long-poll.
     assert!(
         asked.elapsed() >= Duration::from_secs(2),
         "{:?}",

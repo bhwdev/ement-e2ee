@@ -60,10 +60,9 @@ ement-e2ee setup --user-id @you:example.org # See subsection "By hand" below to 
 ```
 
 finds your homeserver (via `.well-known`), writes
-`~/.config/ement-e2ee/config.toml`, installs and starts a systemd user service
-(after asking), and prints the `ement-connect` form to evaluate in Emacs (M-x
-'ielm'). `--homeserver URL` skips discovery, `--no-service` leaves the service
-alone, and an existing config is kept unless `--force` is given. Then, with
+`~/.config/ement-e2ee/config.toml`, and prints how to start the proxy and the
+`ement-connect` form to evaluate in Emacs (M-x 'ielm'). `--homeserver URL`
+skips discovery, and an existing config is kept unless `--force` is given. Then, with
 ement connected:
 
 ```sh
@@ -92,26 +91,11 @@ runs.
    $EDITOR ~/.config/ement-e2ee/config.toml   # set homeserver
    ```
 
-2. Run the proxy — either directly:
+2. Run the proxy:
 
    ```sh
    ement-e2ee serve
    ```
-
-   or as a systemd user service:
-
-   ```sh
-   install -Dm644 contrib/ement-e2ee.service ~/.config/systemd/user/ement-e2ee.service
-   systemctl --user daemon-reload
-   systemctl --user enable --now ement-e2ee
-   journalctl --user -u ement-e2ee -f    # follow the logs
-   ```
-
-   The unit expects the binary at `~/.cargo/bin/ement-e2ee` (where
-   `cargo install` puts it) and starts on login. On WSL2, enable systemd
-   first: add `[boot] systemd=true` to `/etc/wsl.conf`, then restart the
-   distro (`wsl.exe --shutdown`). To keep the proxy alive without an open
-   session, `loginctl enable-linger $USER`.
 
 3. Connect ement through it:
 
@@ -136,8 +120,8 @@ runs.
   for a non-default one).
 - `store_dir` — a leading `~` is expanded.
 
-The proxy shuts down cleanly on SIGINT and SIGTERM (`systemctl stop`),
-giving requests in flight three seconds to finish.
+The proxy shuts down cleanly on SIGINT, SIGTERM and SIGHUP, giving requests
+in flight three seconds to finish.
 
 ## Admin CLI
 
