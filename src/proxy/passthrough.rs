@@ -18,7 +18,9 @@ const HOP_BY_HOP: &[HeaderName] = &[
 ];
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
-    HOP_BY_HOP.contains(name) || name.as_str() == "keep-alive" || name.as_str() == "proxy-connection"
+    HOP_BY_HOP.contains(name)
+        || name.as_str() == "keep-alive"
+        || name.as_str() == "proxy-connection"
 }
 
 fn copy_headers(src: &HeaderMap, dst: &mut HeaderMap) {

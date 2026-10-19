@@ -155,10 +155,7 @@ pub async fn handle_sync(
     };
 
     let status = upstream_resp.status();
-    let content_type = upstream_resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .cloned();
+    let content_type = upstream_resp.headers().get(header::CONTENT_TYPE).cloned();
     let bytes = upstream_resp.bytes().await?;
 
     if !status.is_success() {
@@ -352,7 +349,11 @@ fn is_unknown_token(status: reqwest::StatusCode, body: &[u8]) -> bool {
     status == reqwest::StatusCode::UNAUTHORIZED
         && serde_json::from_slice::<serde_json::Value>(body)
             .ok()
-            .and_then(|v| v.get("errcode").and_then(|c| c.as_str()).map(ToOwned::to_owned))
+            .and_then(|v| {
+                v.get("errcode")
+                    .and_then(|c| c.as_str())
+                    .map(ToOwned::to_owned)
+            })
             .as_deref()
             == Some("M_UNKNOWN_TOKEN")
 }
@@ -403,10 +404,16 @@ mod tests {
     #[test]
     fn unknown_token_detection() {
         let unauthorized = reqwest::StatusCode::UNAUTHORIZED;
-        assert!(is_unknown_token(unauthorized, br#"{"errcode":"M_UNKNOWN_TOKEN"}"#));
+        assert!(is_unknown_token(
+            unauthorized,
+            br#"{"errcode":"M_UNKNOWN_TOKEN"}"#
+        ));
         // Other 401s (e.g. M_MISSING_TOKEN) and other statuses are transient
         // or someone else's problem: they must not evict the session.
-        assert!(!is_unknown_token(unauthorized, br#"{"errcode":"M_MISSING_TOKEN"}"#));
+        assert!(!is_unknown_token(
+            unauthorized,
+            br#"{"errcode":"M_MISSING_TOKEN"}"#
+        ));
         assert!(!is_unknown_token(unauthorized, b"not json"));
         assert!(!is_unknown_token(
             reqwest::StatusCode::FORBIDDEN,

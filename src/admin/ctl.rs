@@ -248,17 +248,25 @@ fn common_query(common: &VerifyCommon) -> String {
 
 fn print_flow(value: &serde_json::Value) {
     // Emoji first and prominently, if present.
-    if let Some(formatted) = value.pointer("/sas/emoji/formatted").and_then(|v| v.as_str()) {
+    if let Some(formatted) = value
+        .pointer("/sas/emoji/formatted")
+        .and_then(|v| v.as_str())
+    {
         println!("\nCompare these emoji with the other device:\n");
         println!("{formatted}\n");
     }
-    println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_default()
+    );
 }
 
 async fn run_verify(client: &Client, action: VerifyAction) -> anyhow::Result<()> {
     match action {
         VerifyAction::List { common } => {
-            let resp = client.get(&format!("verify{}", common_query(&common))).await?;
+            let resp = client
+                .get(&format!("verify{}", common_query(&common)))
+                .await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         VerifyAction::Start { device, common } => {
@@ -357,7 +365,8 @@ impl Client {
     }
 
     pub async fn get(&self, path: &str) -> anyhow::Result<serde_json::Value> {
-        self.send(self.http.get(format!("{}/{path}", self.base))).await
+        self.send(self.http.get(format!("{}/{path}", self.base)))
+            .await
     }
 
     pub async fn post(
@@ -398,7 +407,10 @@ mod tests {
         );
 
         let other_user_only = common(None, Some("@you:example.org"));
-        assert_eq!(common_query(&other_user_only), "?with_user=@you:example.org");
+        assert_eq!(
+            common_query(&other_user_only),
+            "?with_user=@you:example.org"
+        );
         assert_eq!(
             common_body(&other_user_only),
             serde_json::json!({ "with_user": "@you:example.org" })
@@ -408,7 +420,10 @@ mod tests {
     #[test]
     fn client_base_url_tolerates_trailing_slash() {
         for proxy in ["http://127.0.0.1:8009", "http://127.0.0.1:8009/"] {
-            assert_eq!(Client::new(proxy, None).base, "http://127.0.0.1:8009/_ement");
+            assert_eq!(
+                Client::new(proxy, None).base,
+                "http://127.0.0.1:8009/_ement"
+            );
         }
     }
 }

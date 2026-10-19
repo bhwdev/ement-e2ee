@@ -112,115 +112,6 @@ pub fn decrypt_attachment(data: &[u8], info: MediaEncryptionInfo) -> anyhow::Res
     Ok(decrypted)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn attachment_round_trip() {
-        let data = b"hello encrypted world".to_vec();
-        let (encrypted, info) = encrypt_attachment(&data).unwrap();
-        assert_ne!(encrypted, data);
-        let decrypted = decrypt_attachment(&encrypted, info).unwrap();
-        assert_eq!(decrypted, data);
-    }
-
-    #[test]
-    fn cache_round_trip() {
-        let dir = std::env::temp_dir().join(format!("ement-e2ee-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cache = MediaKeyCache::open(&dir.join("media.sqlite")).unwrap();
-
-        let (_, info) = encrypt_attachment(b"data").unwrap();
-        cache
-            .insert("mxc://example.org/abc", &info, Some("image/png"), Some("cat.png"))
-            .unwrap();
-
-        let entry = cache.get("mxc://example.org/abc").unwrap();
-        assert_eq!(entry.mimetype.as_deref(), Some("image/png"));
-        assert_eq!(entry.filename.as_deref(), Some("cat.png"));
-        assert!(cache.get("mxc://example.org/missing").is_none());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn tampered_or_mismatched_attachments_are_rejected() {
-        let data = b"hello encrypted world".to_vec();
-        let (encrypted, info) = encrypt_attachment(&data).unwrap();
-        // MediaEncryptionInfo is not Clone; round-trip it like the cache does.
-        let info_json = serde_json::to_string(&info).unwrap();
-        let info = || serde_json::from_str::<MediaEncryptionInfo>(&info_json).unwrap();
-
-        // One flipped bit of ciphertext fails the SHA-256 check instead of
-        // yielding silently corrupted plaintext.
-        let mut tampered = encrypted.clone();
-        tampered[0] ^= 1;
-        assert!(decrypt_attachment(&tampered, info()).is_err());
-        // So does truncation ...
-        assert!(decrypt_attachment(&encrypted[..encrypted.len() - 1], info()).is_err());
-        // ... and decrypting with another file's key.
-        let (_, other_info) = encrypt_attachment(b"something else").unwrap();
-        assert!(decrypt_attachment(&encrypted, other_info).is_err());
-    }
-
-    #[test]
-    fn attachments_of_any_size_round_trip() {
-        for size in [0usize, 1, 15, 16, 17, 4096, 1 << 20] {
-            let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
-            let (encrypted, info) = encrypt_attachment(&data).unwrap();
-            // AES-CTR: no padding, so ciphertext length reveals exact size.
-            assert_eq!(encrypted.len(), size);
-            assert_eq!(decrypt_attachment(&encrypted, info).unwrap(), data, "size {size}");
-        }
-    }
-
-    #[test]
-    fn each_upload_gets_a_fresh_key() {
-        let (first, first_info) = encrypt_attachment(b"same bytes").unwrap();
-        let (second, second_info) = encrypt_attachment(b"same bytes").unwrap();
-        assert_ne!(first, second);
-        assert_ne!(
-            serde_json::to_value(&first_info).unwrap()["key"]["k"],
-            serde_json::to_value(&second_info).unwrap()["key"]["k"]
-        );
-    }
-
-    #[test]
-    fn cache_persists_and_overwrites() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("media.sqlite");
-        let (encrypted, info) = encrypt_attachment(b"data").unwrap();
-        {
-            let cache = MediaKeyCache::open(&path).unwrap();
-            cache.insert("mxc://example.org/abc", &info, None, None).unwrap();
-            // Seeing the same mxc again (say, with better metadata) replaces
-            // the row rather than failing on the primary key.
-            cache
-                .insert("mxc://example.org/abc", &info, Some("text/plain"), Some("a.txt"))
-                .unwrap();
-        }
-
-        // A proxy restart must not lose the keys: without them, media
-        // received earlier could never be decrypted again.
-        let cache = MediaKeyCache::open(&path).unwrap();
-        let entry = cache.get("mxc://example.org/abc").unwrap();
-        assert_eq!(entry.mimetype.as_deref(), Some("text/plain"));
-        assert_eq!(entry.filename.as_deref(), Some("a.txt"));
-        assert_eq!(decrypt_attachment(&encrypted, entry.info).unwrap(), b"data");
-    }
-
-    #[test]
-    fn encrypted_room_content_rewrite_shape() {
-        // MediaEncryptionInfo must serialize to the spec `file` object minus url.
-        let (_, info) = encrypt_attachment(b"data").unwrap();
-        let value = serde_json::to_value(&info).unwrap();
-        assert_eq!(value["v"], "v2");
-        assert!(value["key"]["k"].is_string());
-        assert!(value["iv"].is_string());
-        assert!(value["hashes"]["sha256"].is_string());
-    }
-}
-
 /// Intercept POST /_matrix/media/*/upload: encrypt the payload, upload the
 /// ciphertext (as octet-stream, without the filename), remember the key.
 pub async fn handle_upload(
@@ -246,8 +137,7 @@ pub async fn handle_upload(
         .await
         .map_err(|e| ProxyError::BadRequest(format!("failed to read upload: {e}")))?;
 
-    let (encrypted, info) =
-        encrypt_attachment(&body).map_err(ProxyError::Internal)?;
+    let (encrypted, info) = encrypt_attachment(&body).map_err(ProxyError::Internal)?;
 
     // Upload ciphertext: opaque content type, no filename (metadata hygiene).
     let upstream_resp = state
@@ -262,16 +152,17 @@ pub async fn handle_upload(
     let status = upstream_resp.status();
     let bytes = upstream_resp.bytes().await?;
 
-    if status.is_success() {
-        if let Some(mxc) = serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|v| v.get("content_uri").and_then(|u| u.as_str()).map(ToOwned::to_owned))
-        {
-            ctx.media
-                .insert(&mxc, &info, content_type.as_deref(), filename.as_deref())
-                .map_err(ProxyError::Internal)?;
-            tracing::info!(%mxc, "uploaded encrypted attachment");
-        }
+    if status.is_success()
+        && let Some(mxc) = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
+            v.get("content_uri")
+                .and_then(|u| u.as_str())
+                .map(ToOwned::to_owned)
+        })
+    {
+        ctx.media
+            .insert(&mxc, &info, content_type.as_deref(), filename.as_deref())
+            .map_err(ProxyError::Internal)?;
+        tracing::info!(%mxc, "uploaded encrypted attachment");
     }
     raw_response(
         status.as_u16(),
@@ -328,12 +219,11 @@ pub async fn handle_download(
     let mut builder = Response::builder()
         .status(200)
         .header(header::CONTENT_TYPE, content_type);
-    if let Some(filename) = &entry.filename {
-        if let Ok(disposition) =
+    if let Some(filename) = &entry.filename
+        && let Ok(disposition) =
             header::HeaderValue::from_str(&format!("inline; filename=\"{filename}\""))
-        {
-            builder = builder.header(header::CONTENT_DISPOSITION, disposition);
-        }
+    {
+        builder = builder.header(header::CONTENT_DISPOSITION, disposition);
     }
     builder
         .body(Body::from(decrypted))
@@ -343,7 +233,11 @@ pub async fn handle_download(
 /// Outgoing content rewrite for encrypted rooms: turn `url` into an
 /// `EncryptedFile`-shaped `file` object using the cached upload key.
 pub fn rewrite_content_for_encrypted_room(ctx: &AccountContext, content: &mut Value) {
-    let Some(mxc) = content.get("url").and_then(|v| v.as_str()).map(ToOwned::to_owned) else {
+    let Some(mxc) = content
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
+    else {
         return;
     };
     let Some(entry) = ctx.media.get(&mxc) else {
@@ -390,29 +284,29 @@ pub fn harvest_and_rewrite_decrypted(ctx: &AccountContext, event: &mut Value) {
         .and_then(|v| v.as_str())
         .map(ToOwned::to_owned);
 
-    if let Some(file_value) = content.get("file").cloned() {
-        if let Some(url) = harvest_file(
+    if let Some(file_value) = content.get("file").cloned()
+        && let Some(url) = harvest_file(
             ctx,
             file_value,
             mimetype_hint.as_deref(),
             filename_hint.as_deref(),
-        ) {
-            content.remove("file");
-            content.insert("url".into(), url.into());
-        }
+        )
+    {
+        content.remove("file");
+        content.insert("url".into(), url.into());
     }
 
-    if let Some(info) = content.get_mut("info").and_then(Value::as_object_mut) {
-        if let Some(thumb_value) = info.get("thumbnail_file").cloned() {
-            let thumb_mime = info
-                .get("thumbnail_info")
-                .and_then(|i| i.get("mimetype"))
-                .and_then(|v| v.as_str())
-                .map(ToOwned::to_owned);
-            if let Some(url) = harvest_file(ctx, thumb_value, thumb_mime.as_deref(), None) {
-                info.remove("thumbnail_file");
-                info.insert("thumbnail_url".into(), url.into());
-            }
+    if let Some(info) = content.get_mut("info").and_then(Value::as_object_mut)
+        && let Some(thumb_value) = info.get("thumbnail_file").cloned()
+    {
+        let thumb_mime = info
+            .get("thumbnail_info")
+            .and_then(|i| i.get("mimetype"))
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        if let Some(url) = harvest_file(ctx, thumb_value, thumb_mime.as_deref(), None) {
+            info.remove("thumbnail_file");
+            info.insert("thumbnail_url".into(), url.into());
         }
     }
 }
@@ -441,7 +335,11 @@ pub async fn reupload_plaintext_if_needed(
     ctx: &Arc<AccountContext>,
     content: &mut Value,
 ) -> anyhow::Result<()> {
-    let Some(mxc) = content.get("url").and_then(|v| v.as_str()).map(ToOwned::to_owned) else {
+    let Some(mxc) = content
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
+    else {
         return Ok(());
     };
     let Some(entry) = ctx.media.get(&mxc) else {
@@ -470,7 +368,9 @@ pub async fn reupload_plaintext_if_needed(
 
     let mut upload_url = state.upstream.url("/_matrix/media/v3/upload");
     if let Some(filename) = &entry.filename {
-        upload_url.query_pairs_mut().append_pair("filename", filename);
+        upload_url
+            .query_pairs_mut()
+            .append_pair("filename", filename);
     }
     let resp = state
         .upstream
@@ -479,7 +379,10 @@ pub async fn reupload_plaintext_if_needed(
         .bearer_auth(&ctx.token)
         .header(
             header::CONTENT_TYPE,
-            entry.mimetype.as_deref().unwrap_or("application/octet-stream"),
+            entry
+                .mimetype
+                .as_deref()
+                .unwrap_or("application/octet-stream"),
         )
         .body(plaintext)
         .send()
@@ -494,4 +397,129 @@ pub async fn reupload_plaintext_if_needed(
     tracing::info!(old = %mxc, new = %new_mxc, "re-uploaded media as plaintext for unencrypted room");
     content["url"] = new_mxc.into();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_round_trip() {
+        let data = b"hello encrypted world".to_vec();
+        let (encrypted, info) = encrypt_attachment(&data).unwrap();
+        assert_ne!(encrypted, data);
+        let decrypted = decrypt_attachment(&encrypted, info).unwrap();
+        assert_eq!(decrypted, data);
+    }
+
+    #[test]
+    fn cache_round_trip() {
+        let dir = std::env::temp_dir().join(format!("ement-e2ee-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = MediaKeyCache::open(&dir.join("media.sqlite")).unwrap();
+
+        let (_, info) = encrypt_attachment(b"data").unwrap();
+        cache
+            .insert(
+                "mxc://example.org/abc",
+                &info,
+                Some("image/png"),
+                Some("cat.png"),
+            )
+            .unwrap();
+
+        let entry = cache.get("mxc://example.org/abc").unwrap();
+        assert_eq!(entry.mimetype.as_deref(), Some("image/png"));
+        assert_eq!(entry.filename.as_deref(), Some("cat.png"));
+        assert!(cache.get("mxc://example.org/missing").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tampered_or_mismatched_attachments_are_rejected() {
+        let data = b"hello encrypted world".to_vec();
+        let (encrypted, info) = encrypt_attachment(&data).unwrap();
+        // MediaEncryptionInfo is not Clone; round-trip it like the cache does.
+        let info_json = serde_json::to_string(&info).unwrap();
+        let info = || serde_json::from_str::<MediaEncryptionInfo>(&info_json).unwrap();
+
+        // One flipped bit of ciphertext fails the SHA-256 check instead of
+        // yielding silently corrupted plaintext.
+        let mut tampered = encrypted.clone();
+        tampered[0] ^= 1;
+        assert!(decrypt_attachment(&tampered, info()).is_err());
+        // So does truncation ...
+        assert!(decrypt_attachment(&encrypted[..encrypted.len() - 1], info()).is_err());
+        // ... and decrypting with another file's key.
+        let (_, other_info) = encrypt_attachment(b"something else").unwrap();
+        assert!(decrypt_attachment(&encrypted, other_info).is_err());
+    }
+
+    #[test]
+    fn attachments_of_any_size_round_trip() {
+        for size in [0usize, 1, 15, 16, 17, 4096, 1 << 20] {
+            let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let (encrypted, info) = encrypt_attachment(&data).unwrap();
+            // AES-CTR: no padding, so ciphertext length reveals exact size.
+            assert_eq!(encrypted.len(), size);
+            assert_eq!(
+                decrypt_attachment(&encrypted, info).unwrap(),
+                data,
+                "size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_upload_gets_a_fresh_key() {
+        let (first, first_info) = encrypt_attachment(b"same bytes").unwrap();
+        let (second, second_info) = encrypt_attachment(b"same bytes").unwrap();
+        assert_ne!(first, second);
+        assert_ne!(
+            serde_json::to_value(&first_info).unwrap()["key"]["k"],
+            serde_json::to_value(&second_info).unwrap()["key"]["k"]
+        );
+    }
+
+    #[test]
+    fn cache_persists_and_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("media.sqlite");
+        let (encrypted, info) = encrypt_attachment(b"data").unwrap();
+        {
+            let cache = MediaKeyCache::open(&path).unwrap();
+            cache
+                .insert("mxc://example.org/abc", &info, None, None)
+                .unwrap();
+            // Seeing the same mxc again (say, with better metadata) replaces
+            // the row rather than failing on the primary key.
+            cache
+                .insert(
+                    "mxc://example.org/abc",
+                    &info,
+                    Some("text/plain"),
+                    Some("a.txt"),
+                )
+                .unwrap();
+        }
+
+        // A proxy restart must not lose the keys: without them, media
+        // received earlier could never be decrypted again.
+        let cache = MediaKeyCache::open(&path).unwrap();
+        let entry = cache.get("mxc://example.org/abc").unwrap();
+        assert_eq!(entry.mimetype.as_deref(), Some("text/plain"));
+        assert_eq!(entry.filename.as_deref(), Some("a.txt"));
+        assert_eq!(decrypt_attachment(&encrypted, entry.info).unwrap(), b"data");
+    }
+
+    #[test]
+    fn encrypted_room_content_rewrite_shape() {
+        // MediaEncryptionInfo must serialize to the spec `file` object minus url.
+        let (_, info) = encrypt_attachment(b"data").unwrap();
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["v"], "v2");
+        assert!(value["key"]["k"].is_string());
+        assert!(value["iv"].is_string());
+        assert!(value["hashes"]["sha256"].is_string());
+    }
 }

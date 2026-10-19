@@ -76,7 +76,8 @@ mod tests {
     fn url_joins_path_and_query_onto_base() {
         let up = upstream("https://matrix.example.org");
         assert_eq!(
-            up.url("/_matrix/client/v3/sync?since=s1&timeout=30000").as_str(),
+            up.url("/_matrix/client/v3/sync?since=s1&timeout=30000")
+                .as_str(),
             "https://matrix.example.org/_matrix/client/v3/sync?since=s1&timeout=30000"
         );
         // A port and a trailing slash on the base change nothing.
@@ -101,7 +102,11 @@ mod tests {
         // The request path is attacker-influenced (any local process can talk
         // to the proxy); it must never change where the token is sent.
         let up = upstream("https://matrix.example.org");
-        for path in ["//evil.example/_matrix", "/\\evil.example/x", "/@evil.example/x"] {
+        for path in [
+            "//evil.example/_matrix",
+            "/\\evil.example/x",
+            "/@evil.example/x",
+        ] {
             assert_eq!(
                 up.url(path).host_str(),
                 Some("matrix.example.org"),

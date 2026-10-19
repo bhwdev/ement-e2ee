@@ -282,7 +282,10 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_matrix_ids_readable() {
-        assert_eq!(sanitize_for_path("@alice:example.org"), "@alice:example.org");
+        assert_eq!(
+            sanitize_for_path("@alice:example.org"),
+            "@alice:example.org"
+        );
         assert_eq!(sanitize_for_path("ABCDEFGHIJ"), "ABCDEFGHIJ");
         assert_eq!(sanitize_for_path("a.b-c_d=e+f"), "a.b-c_d=e+f");
     }

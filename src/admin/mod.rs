@@ -194,9 +194,7 @@ async fn debug(
         ("GET", ["logs"]) => {
             let level = query.get("level").map_or("info", String::as_str);
             let Ok(level) = level.parse::<tracing::Level>() else {
-                return bad_request(format!(
-                    "{level:?} is not a log level (error, warn, info)"
-                ));
+                return bad_request(format!("{level:?} is not a log level (error, warn, info)"));
             };
             let limit = query
                 .get("limit")

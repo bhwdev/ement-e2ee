@@ -237,7 +237,10 @@ async fn decrypt_event(
 /// Feed decrypted in-room verification events to the verification machine so
 /// `ctl verify` also works for in-room (other-user DM) flows.
 async fn maybe_feed_verification(ctx: &Arc<AccountContext>, event: &Value) {
-    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+    let event_type = event
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     let is_verification = event_type.starts_with("m.key.verification.")
         || (event_type == "m.room.message"
             && event.pointer("/content/msgtype").and_then(|v| v.as_str())
@@ -291,6 +294,54 @@ fn utd_placeholder(
     );
     placeholder["unsigned"] = Value::Object(unsigned);
     placeholder
+}
+
+/// Ask other own-devices / original sender for the missing room key, once per
+/// megolm session.
+async fn maybe_request_room_key(
+    ctx: &Arc<AccountContext>,
+    room_id: &RoomId,
+    raw: &Raw<EncryptedEvent>,
+    session_id: Option<&str>,
+) {
+    let Some(session_id) = session_id else { return };
+    {
+        let mut requested = ctx.rooms.requested_sessions.lock().await;
+        if !requested.insert(session_id.to_owned()) {
+            return;
+        }
+    }
+
+    let ctx = ctx.clone();
+    let room_id = room_id.to_owned();
+    let raw = raw.clone();
+    let session_id = session_id.to_owned();
+    tokio::spawn(async move {
+        let result = async {
+            // The request sits in the machine's outgoing queue until marked
+            // as sent; without the pump lock a concurrent pump sends it too.
+            let _guard = ctx.pump_lock.lock().await;
+            let (cancellation, request) = ctx.olm.request_room_key(&raw, &room_id).await?;
+            if let Some(cancellation) = cancellation {
+                machine::send_and_mark(&ctx, &cancellation).await?;
+            }
+            machine::send_and_mark(&ctx, &request).await?;
+            anyhow::Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => tracing::info!(%room_id, %session_id, "room key requested"),
+            Err(e) => {
+                tracing::warn!(%room_id, %session_id, error = ?e, "room key request failed");
+                // Allow a retry on a later UTD for this session.
+                ctx.rooms
+                    .requested_sessions
+                    .lock()
+                    .await
+                    .remove(&session_id);
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -365,48 +416,4 @@ mod tests {
         // Notifications are never repaired: no such promise there.
         assert_eq!(body(false), "🔒 [undecryptable: MissingRoomKey]");
     }
-}
-
-/// Ask other own-devices / original sender for the missing room key, once per
-/// megolm session.
-async fn maybe_request_room_key(
-    ctx: &Arc<AccountContext>,
-    room_id: &RoomId,
-    raw: &Raw<EncryptedEvent>,
-    session_id: Option<&str>,
-) {
-    let Some(session_id) = session_id else { return };
-    {
-        let mut requested = ctx.rooms.requested_sessions.lock().await;
-        if !requested.insert(session_id.to_owned()) {
-            return;
-        }
-    }
-
-    let ctx = ctx.clone();
-    let room_id = room_id.to_owned();
-    let raw = raw.clone();
-    let session_id = session_id.to_owned();
-    tokio::spawn(async move {
-        let result = async {
-            // The request sits in the machine's outgoing queue until marked
-            // as sent; without the pump lock a concurrent pump sends it too.
-            let _guard = ctx.pump_lock.lock().await;
-            let (cancellation, request) = ctx.olm.request_room_key(&raw, &room_id).await?;
-            if let Some(cancellation) = cancellation {
-                machine::send_and_mark(&ctx, &cancellation).await?;
-            }
-            machine::send_and_mark(&ctx, &request).await?;
-            anyhow::Ok(())
-        }
-        .await;
-        match result {
-            Ok(()) => tracing::info!(%room_id, %session_id, "room key requested"),
-            Err(e) => {
-                tracing::warn!(%room_id, %session_id, error = ?e, "room key request failed");
-                // Allow a retry on a later UTD for this session.
-                ctx.rooms.requested_sessions.lock().await.remove(&session_id);
-            }
-        }
-    });
 }

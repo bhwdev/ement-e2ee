@@ -26,9 +26,7 @@ struct BackupVersionInfo {
 }
 
 /// Fetch the current backup version from the server; None if no backup exists.
-async fn current_backup_version(
-    ctx: &AccountContext,
-) -> anyhow::Result<Option<BackupVersionInfo>> {
+async fn current_backup_version(ctx: &AccountContext) -> anyhow::Result<Option<BackupVersionInfo>> {
     let (status, body) = ctx
         .upstream
         .json_request(
@@ -109,9 +107,8 @@ pub async fn restore_from_backup(
     if !status.is_success() {
         anyhow::bail!("downloading room keys failed: {status} {body}");
     }
-    let downloaded: get_backup_keys::v3::Response =
-        crate::crypto::machine::parse_response(&body)
-            .context("malformed room_keys/keys response")?;
+    let downloaded: get_backup_keys::v3::Response = crate::crypto::machine::parse_response(&body)
+        .context("malformed room_keys/keys response")?;
 
     // Decrypt each session and import, mirroring handle_downloaded_room_keys.
     let mut total = 0usize;

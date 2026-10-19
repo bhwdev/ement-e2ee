@@ -102,11 +102,9 @@ impl Config {
     pub fn load(args: &ServeArgs) -> anyhow::Result<Self> {
         let file = FileConfig::read(args.config.as_deref())?;
 
-        let homeserver = args
-            .homeserver
-            .clone()
-            .or(file.homeserver)
-            .context("no homeserver configured (set `homeserver` in config.toml or pass --homeserver)")?;
+        let homeserver = args.homeserver.clone().or(file.homeserver).context(
+            "no homeserver configured (set `homeserver` in config.toml or pass --homeserver)",
+        )?;
         let homeserver = parse_homeserver(&homeserver)?;
 
         let store_dir = args
@@ -117,9 +115,9 @@ impl Config {
             .context("could not determine store directory")?;
 
         let store_passphrase = match (file.store_passphrase, file.store_passphrase_command) {
-            (Some(_), Some(_)) => anyhow::bail!(
-                "set either store_passphrase or store_passphrase_command, not both"
-            ),
+            (Some(_), Some(_)) => {
+                anyhow::bail!("set either store_passphrase or store_passphrase_command, not both")
+            }
             (passphrase, None) => passphrase,
             (None, Some(command)) => Some(passphrase_from_command(&command)?),
         };
@@ -153,7 +151,10 @@ impl AdminEndpoint {
         let file = FileConfig::read(config)?;
         let url = match proxy {
             Some(proxy) => proxy.trim_end_matches('/').to_owned(),
-            None => format!("http://{}", connect_addr(file.listen.unwrap_or(DEFAULT_LISTEN))),
+            None => format!(
+                "http://{}",
+                connect_addr(file.listen.unwrap_or(DEFAULT_LISTEN))
+            ),
         };
         Ok(Self {
             url,
@@ -163,7 +164,9 @@ impl AdminEndpoint {
 
     /// The listen address a config file sets (or the default).
     pub fn listen(config: &Path) -> anyhow::Result<SocketAddr> {
-        Ok(FileConfig::read(Some(config))?.listen.unwrap_or(DEFAULT_LISTEN))
+        Ok(FileConfig::read(Some(config))?
+            .listen
+            .unwrap_or(DEFAULT_LISTEN))
     }
 }
 
@@ -294,7 +297,10 @@ mod tests {
         // Only a leading `~` component is special.
         assert_eq!(expand_tilde("/srv/~/x".into()), PathBuf::from("/srv/~/x"));
         assert_eq!(expand_tilde("~other/x".into()), PathBuf::from("~other/x"));
-        assert_eq!(expand_tilde("relative/x".into()), PathBuf::from("relative/x"));
+        assert_eq!(
+            expand_tilde("relative/x".into()),
+            PathBuf::from("relative/x")
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let args = args_for(

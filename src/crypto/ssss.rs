@@ -107,7 +107,7 @@ async fn get_secret(
 /// Run a /keys/query for our own user and feed the response to the machine,
 /// so the public cross-signing identity is known/refreshed.
 async fn query_own_keys(ctx: &AccountContext) -> anyhow::Result<()> {
-    let (request_id, request) = ctx.olm.query_keys_for_users([ctx.user_id.as_ref()].into_iter());
+    let (request_id, request) = ctx.olm.query_keys_for_users([ctx.user_id.as_ref()]);
     let body = serde_json::json!({ "device_keys": request.device_keys });
     let (status, response_body) = ctx
         .upstream
@@ -162,7 +162,10 @@ pub async fn bootstrap(
             .get_device(&ctx.user_id, &ctx.device_id, None)
             .await?
             .context("own device not found in store")?;
-        let signature_upload = device.verify().await.context("self-signing device failed")?;
+        let signature_upload = device
+            .verify()
+            .await
+            .context("self-signing device failed")?;
         let (status_code, response_body) = ctx
             .upstream
             .json_request(

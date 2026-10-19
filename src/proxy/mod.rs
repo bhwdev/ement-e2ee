@@ -120,12 +120,10 @@ async fn handle(State(state): State<AppState>, req: Request) -> Result<Response,
         route @ (Route::Messages { .. }
         | Route::Context { .. }
         | Route::RoomEvent { .. }
-        | Route::Notifications) => {
-            match context_for(&state, token).await? {
-                Some(ctx) => intercept::handle_history_get(&state, ctx, req, route).await,
-                None => passthrough(&state, req).await,
-            }
-        }
+        | Route::Notifications) => match context_for(&state, token).await? {
+            Some(ctx) => intercept::handle_history_get(&state, ctx, req, route).await,
+            None => passthrough(&state, req).await,
+        },
         Route::Send {
             room_id,
             event_type,
@@ -196,8 +194,14 @@ mod tests {
         assert_eq!(bearer_token(&request("/sync", None)), None);
         assert_eq!(bearer_token(&request("/sync?timeout=0", None)), None);
         // Other auth schemes are not access tokens.
-        assert_eq!(bearer_token(&request("/sync", Some("Basic dXNlcjpwYXNz"))), None);
+        assert_eq!(
+            bearer_token(&request("/sync", Some("Basic dXNlcjpwYXNz"))),
+            None
+        );
         // A parameter that merely ends in the same name is not the token.
-        assert_eq!(bearer_token(&request("/sync?not_access_token=x", None)), None);
+        assert_eq!(
+            bearer_token(&request("/sync?not_access_token=x", None)),
+            None
+        );
     }
 }

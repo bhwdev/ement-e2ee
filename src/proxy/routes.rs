@@ -53,15 +53,20 @@ pub fn classify(method: &Method, path: &str) -> Route {
     match segments.as_slice() {
         ["_matrix", "client", _v, "login"] if method == Method::POST => Route::Login,
         ["_matrix", "client", _v, "sync"] if method == Method::GET => Route::Sync,
-        ["_matrix", "client", _v, "rooms", room, "send", event_type, txn]
-            if method == Method::PUT =>
-        {
-            Route::Send {
-                room_id: dec(room),
-                event_type: dec(event_type),
-                txn_id: dec(txn),
-            }
-        }
+        [
+            "_matrix",
+            "client",
+            _v,
+            "rooms",
+            room,
+            "send",
+            event_type,
+            txn,
+        ] if method == Method::PUT => Route::Send {
+            room_id: dec(room),
+            event_type: dec(event_type),
+            txn_id: dec(txn),
+        },
         ["_matrix", "client", _v, "rooms", room, "messages"] if method == Method::GET => {
             Route::Messages { room_id: dec(room) }
         }
@@ -71,19 +76,22 @@ pub fn classify(method: &Method, path: &str) -> Route {
         ["_matrix", "client", _v, "rooms", room, "event", _event] if method == Method::GET => {
             Route::RoomEvent { room_id: dec(room) }
         }
-        ["_matrix", "client", _v, "notifications"] if method == Method::GET => {
-            Route::Notifications
-        }
+        ["_matrix", "client", _v, "notifications"] if method == Method::GET => Route::Notifications,
         ["_matrix", "media", _v, "upload"] if method == Method::POST => Route::MediaUpload,
-        ["_matrix", "client", _v, "media", "download", server, media_id, ..]
-            if method == Method::GET =>
-        {
-            Route::MediaDownload {
-                server: dec(server),
-                media_id: dec(media_id),
-                authenticated: true,
-            }
-        }
+        [
+            "_matrix",
+            "client",
+            _v,
+            "media",
+            "download",
+            server,
+            media_id,
+            ..,
+        ] if method == Method::GET => Route::MediaDownload {
+            server: dec(server),
+            media_id: dec(media_id),
+            authenticated: true,
+        },
         ["_matrix", "media", _v, "download", server, media_id, ..] if method == Method::GET => {
             Route::MediaDownload {
                 server: dec(server),
@@ -158,14 +166,18 @@ mod tests {
                 &Method::GET,
                 "/_matrix/client/r0/rooms/!abc%3Aexample.org/messages"
             ),
-            Route::Messages { room_id: room.clone() }
+            Route::Messages {
+                room_id: room.clone()
+            }
         );
         assert_eq!(
             classify(
                 &Method::GET,
                 "/_matrix/client/v3/rooms/%21abc%3Aexample.org/context/%24event"
             ),
-            Route::Context { room_id: room.clone() }
+            Route::Context {
+                room_id: room.clone()
+            }
         );
         assert_eq!(
             classify(
@@ -193,12 +205,22 @@ mod tests {
         for (method, path) in [
             (Method::POST, "/_matrix/client/v3/sync"),
             (Method::POST, "/_matrix/client/r0/notifications"),
-            (Method::GET, "/_matrix/client/r0/rooms/!a%3Ab/send/m.room.message/1"),
+            (
+                Method::GET,
+                "/_matrix/client/r0/rooms/!a%3Ab/send/m.room.message/1",
+            ),
             (Method::POST, "/_matrix/client/r0/rooms/!a%3Ab/messages"),
             (Method::GET, "/_matrix/media/r0/upload"),
-            (Method::POST, "/_matrix/client/v1/media/download/example.org/abcd"),
+            (
+                Method::POST,
+                "/_matrix/client/v1/media/download/example.org/abcd",
+            ),
         ] {
-            assert_eq!(classify(&method, path), Route::Passthrough, "{method} {path}");
+            assert_eq!(
+                classify(&method, path),
+                Route::Passthrough,
+                "{method} {path}"
+            );
         }
     }
 
@@ -239,9 +261,15 @@ mod tests {
             classify(&Method::POST, "/_ement/verify/abc/confirm"),
             Route::Admin("verify/abc/confirm".into())
         );
-        assert_eq!(classify(&Method::GET, "/_ement"), Route::Admin(String::new()));
+        assert_eq!(
+            classify(&Method::GET, "/_ement"),
+            Route::Admin(String::new())
+        );
         // Only the exact prefix is the admin API.
-        assert_eq!(classify(&Method::GET, "/_ementx/status"), Route::Passthrough);
+        assert_eq!(
+            classify(&Method::GET, "/_ementx/status"),
+            Route::Passthrough
+        );
     }
 
     #[test]
@@ -256,7 +284,11 @@ mod tests {
             "/.well-known/matrix/client",
         ] {
             for method in [Method::GET, Method::PUT, Method::POST] {
-                assert_eq!(classify(&method, path), Route::Passthrough, "{method} {path}");
+                assert_eq!(
+                    classify(&method, path),
+                    Route::Passthrough,
+                    "{method} {path}"
+                );
             }
         }
     }

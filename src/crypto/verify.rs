@@ -87,7 +87,8 @@ pub fn record_finished(ctx: &AccountContext) {
             if request.is_done() || request.is_cancelled() {
                 let mut summary = flow_summary(ctx, &request);
                 summary["finished"] = true.into();
-                ctx.verifications.record(request.flow_id().as_str(), summary);
+                ctx.verifications
+                    .record(request.flow_id().as_str(), summary);
             }
         }
     }
@@ -239,10 +240,7 @@ pub async fn list(ctx: &AccountContext, with_user: &UserId) -> Value {
 
 /// POST /_ement/verify/start — request verification of one of our own other
 /// devices.
-pub async fn start(
-    ctx: &std::sync::Arc<AccountContext>,
-    device_id: &str,
-) -> anyhow::Result<Value> {
+pub async fn start(ctx: &std::sync::Arc<AccountContext>, device_id: &str) -> anyhow::Result<Value> {
     let device = ctx
         .olm
         .get_device(&ctx.user_id, device_id.into(), None)
@@ -250,13 +248,21 @@ pub async fn start(
         .with_context(|| format!("device {device_id} not found (has it queried keys yet?)"))?;
     let (request, outgoing) = device.request_verification();
     send_verification_request(ctx, outgoing).await?;
-    tracing::info!(device_id, flow_id = request.flow_id().as_str(), "verification requested");
+    tracing::info!(
+        device_id,
+        flow_id = request.flow_id().as_str(),
+        "verification requested"
+    );
     Ok(flow_summary(ctx, &request))
 }
 
 /// GET /_ement/verify/{flow} — full state of one flow, including emoji.
 /// A flow that has ended is answered from the log of finished flows.
-pub async fn show(ctx: &AccountContext, with_user: &UserId, flow_id: &str) -> anyhow::Result<Value> {
+pub async fn show(
+    ctx: &AccountContext,
+    with_user: &UserId,
+    flow_id: &str,
+) -> anyhow::Result<Value> {
     ctx.verifications.watch(with_user);
     record_finished(ctx);
     let summary = match ctx.olm.get_verification_request(with_user, flow_id) {

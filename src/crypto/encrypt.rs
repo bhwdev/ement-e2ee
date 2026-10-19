@@ -202,11 +202,7 @@ async fn encryption_settings(
     ctx: &AccountContext,
     room_id: &RoomId,
 ) -> anyhow::Result<EncryptionSettings> {
-    let room_settings = ctx
-        .olm
-        .room_settings(room_id)
-        .await?
-        .unwrap_or_default();
+    let room_settings = ctx.olm.room_settings(room_id).await?.unwrap_or_default();
     let mut settings = EncryptionSettings {
         algorithm: room_settings.algorithm,
         history_visibility: rooms::history_visibility_or_fetch(ctx, room_id).await,

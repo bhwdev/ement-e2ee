@@ -187,7 +187,13 @@ mod tests {
         assert_eq!(cli.serve.homeserver.as_deref(), Some("https://matrix.org"));
         assert_eq!(cli.serve.log_level.as_deref(), Some("debug"));
 
-        let cli = parse(&["serve", "--listen", "127.0.0.1:9000", "--store-dir", "/tmp/s"]);
+        let cli = parse(&[
+            "serve",
+            "--listen",
+            "127.0.0.1:9000",
+            "--store-dir",
+            "/tmp/s",
+        ]);
         let Some(Command::Serve(args)) = cli.command else {
             panic!("expected serve");
         };
@@ -204,21 +210,49 @@ mod tests {
             &["ctl", "bootstrap", "--user-id", "@me:example.org"],
             &["ctl", "verify"],
             &["ctl", "verify", "--device", "ELEMENTDEVICEID"],
-            &["ctl", "verify", "--timeout", "60", "--with-user", "@you:example.org"],
+            &[
+                "ctl",
+                "verify",
+                "--timeout",
+                "60",
+                "--with-user",
+                "@you:example.org",
+            ],
             &["ctl", "verify", "list"],
             &["ctl", "verify", "start", "ELEMENTDEVICEID"],
             &["ctl", "verify", "show", "flow1"],
             &["ctl", "verify", "accept", "flow1"],
             &["ctl", "verify", "start-sas", "flow1"],
             &["ctl", "verify", "sas-accept", "flow1"],
-            &["ctl", "verify", "confirm", "flow1", "--with-user", "@you:example.org"],
+            &[
+                "ctl",
+                "verify",
+                "confirm",
+                "flow1",
+                "--with-user",
+                "@you:example.org",
+            ],
             &["ctl", "verify", "cancel", "flow1"],
             &["ctl", "keys", "export", "keys.txt"],
-            &["ctl", "keys", "import", "keys.txt", "--user-id", "@me:example.org"],
+            &[
+                "ctl",
+                "keys",
+                "import",
+                "keys.txt",
+                "--user-id",
+                "@me:example.org",
+            ],
             &["ctl", "--proxy", "http://127.0.0.1:9000", "status"],
             &["ctl", "debug", "check"],
             &["ctl", "debug", "check", "--json"],
-            &["ctl", "debug", "--json", "session", "--user-id", "@me:example.org"],
+            &[
+                "ctl",
+                "debug",
+                "--json",
+                "session",
+                "--user-id",
+                "@me:example.org",
+            ],
             &["ctl", "debug", "devices"],
             &["ctl", "debug", "devices", "@you:example.org"],
             &["ctl", "debug", "room", "!room:example.org"],
@@ -241,7 +275,14 @@ mod tests {
         assert_eq!(args.proxy, None);
         assert_eq!(args.config, None);
 
-        let cli = parse(&["ctl", "--config", "/etc/ement.toml", "--proxy", "http://[::1]:9", "status"]);
+        let cli = parse(&[
+            "ctl",
+            "--config",
+            "/etc/ement.toml",
+            "--proxy",
+            "http://[::1]:9",
+            "status",
+        ]);
         let Some(Command::Ctl(args)) = cli.command else {
             panic!("expected ctl");
         };
@@ -254,8 +295,21 @@ mod tests {
         for args in [
             &["setup"][..],
             &["setup", "--user-id", "@me:example.org"],
-            &["setup", "--homeserver", "https://matrix.example.org", "--no-service"],
-            &["setup", "--listen", "127.0.0.1:9000", "--config", "/tmp/c.toml", "--force", "--yes"],
+            &[
+                "setup",
+                "--homeserver",
+                "https://matrix.example.org",
+                "--no-service",
+            ],
+            &[
+                "setup",
+                "--listen",
+                "127.0.0.1:9000",
+                "--config",
+                "/tmp/c.toml",
+                "--force",
+                "--yes",
+            ],
         ] {
             let cli = parse(args);
             assert!(matches!(cli.command, Some(Command::Setup(_))), "{args:?}");

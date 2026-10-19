@@ -2,7 +2,6 @@ use anyhow::Context as _;
 use matrix_sdk_crypto::OlmMachine;
 use matrix_sdk_crypto::types::requests::{AnyOutgoingRequest, OutgoingRequest, ToDeviceRequest};
 use matrix_sdk_sqlite::SqliteCryptoStore;
-use ruma::api::error::FromHttpResponseError;
 use ruma::api::IncomingResponse;
 use ruma::api::client::{
     keys::{
@@ -13,6 +12,7 @@ use ruma::api::client::{
     message::send_message_event::v3::Response as RoomMessageResponse,
     to_device::send_event_to_device::v3::Response as ToDeviceResponse,
 };
+use ruma::api::error::FromHttpResponseError;
 use ruma::events::MessageLikeEventContent as _;
 use ruma::{DeviceId, UserId};
 use serde_json::json;
@@ -291,10 +291,7 @@ pub async fn send_keys_claim(
 }
 
 /// Send a single ToDeviceRequest (e.g. room key shares) and mark it as sent.
-pub async fn send_to_device(
-    ctx: &AccountContext,
-    request: &ToDeviceRequest,
-) -> anyhow::Result<()> {
+pub async fn send_to_device(ctx: &AccountContext, request: &ToDeviceRequest) -> anyhow::Result<()> {
     let (status, response_body) = ctx
         .upstream
         .json_request(
@@ -308,7 +305,9 @@ pub async fn send_to_device(
         anyhow::bail!("sendToDevice returned {status}: {response_body}");
     }
     let response: ToDeviceResponse = parse_response(&response_body)?;
-    ctx.olm.mark_request_as_sent(&request.txn_id, &response).await?;
+    ctx.olm
+        .mark_request_as_sent(&request.txn_id, &response)
+        .await?;
     Ok(())
 }
 
@@ -327,7 +326,10 @@ mod tests {
     #[test]
     fn enc_escapes_matrix_sigils_for_path_segments() {
         assert_eq!(enc("!abc:example.org"), "%21abc%3Aexample.org");
-        assert_eq!(enc("$event/with+odd?chars#"), "%24event%2Fwith%2Bodd%3Fchars%23");
+        assert_eq!(
+            enc("$event/with+odd?chars#"),
+            "%24event%2Fwith%2Bodd%3Fchars%23"
+        );
         assert_eq!(enc("@alice:example.org"), "%40alice%3Aexample.org");
         // Unreserved characters stay readable; everything else is escaped.
         assert_eq!(enc("m.room.message-1_2~3"), "m.room.message-1_2~3");
@@ -360,15 +362,13 @@ mod tests {
     #[test]
     fn parse_response_accepts_homeserver_bodies() {
         let response: KeysUploadResponse =
-            parse_response(&json!({ "one_time_key_counts": { "signed_curve25519": 50 } }))
-                .unwrap();
+            parse_response(&json!({ "one_time_key_counts": { "signed_curve25519": 50 } })).unwrap();
         let count = response.one_time_key_counts[&ruma::OneTimeKeyAlgorithm::SignedCurve25519];
         assert_eq!(count, 50u32.into());
 
         // Empty-object responses, as sendToDevice returns.
         parse_response::<ToDeviceResponse>(&json!({})).unwrap();
-        let response: RoomMessageResponse =
-            parse_response(&json!({ "event_id": "$abc" })).unwrap();
+        let response: RoomMessageResponse = parse_response(&json!({ "event_id": "$abc" })).unwrap();
         assert_eq!(response.event_id, "$abc");
     }
 
