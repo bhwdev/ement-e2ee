@@ -93,7 +93,9 @@ A program set here has to be new enough as well."
 
 (defcustom ement-e2ee-binary-directory (locate-user-emacs-file "ement-e2ee/")
   "Where `ement-e2ee-install' puts the binaries it downloads or builds.
-Each version gets a directory of its own: VERSION/bin/ement-e2ee."
+Each version gets a directory of its own: VERSION/bin/ement-e2ee.
+Those of older versions are deleted once a proxy of the version
+this package needs has started."
   :type 'directory)
 
 (defcustom ement-e2ee-config-file nil
@@ -254,6 +256,32 @@ VERSION defaults to `ement-e2ee-binary-version'."
   (expand-file-name (concat (or version ement-e2ee-binary-version) "/bin/ement-e2ee")
                     ement-e2ee-binary-directory))
 
+(defun ement-e2ee--managed-directory-p (directory)
+  "Whether DIRECTORY has nothing but what `ement-e2ee-install' puts there.
+That is bin/ement-e2ee (or a partial download of it) and the
+records of cargo install."
+  (let ((bin (expand-file-name "bin" directory)))
+    (and (file-directory-p directory)
+         (not (file-symlink-p directory))
+         (cl-subsetp (directory-files directory nil directory-files-no-dot-files-regexp)
+                     '("bin" ".crates.toml" ".crates2.json")
+                     :test #'equal)
+         (or (not (file-exists-p bin))
+             (and (file-directory-p bin)
+                  (not (file-symlink-p bin))
+                  (cl-subsetp (directory-files bin nil directory-files-no-dot-files-regexp)
+                              '("ement-e2ee" "ement-e2ee.part")
+                              :test #'equal))))))
+
+(defun ement-e2ee--old-binary-directories ()
+  "Return the directories `ement-e2ee-install' made for older versions."
+  (and (file-directory-p ement-e2ee-binary-directory)
+       (cl-loop for directory in (directory-files ement-e2ee-binary-directory t (rx bos digit))
+                for version = (file-name-nondirectory directory)
+                when (and (ement-e2ee--version< version ement-e2ee-binary-version)
+                          (ement-e2ee--managed-directory-p directory))
+                collect directory)))
+
 (defun ement-e2ee--locate-binary ()
   "Return the ement-e2ee executable to run, or nil if there is none.
 Signal an error if `ement-e2ee-program' is set but not usable."
@@ -356,6 +384,18 @@ only; it runs no store_passphrase_command."
       (error "Checksum mismatch for %s: expected %s, got %s"
              (file-name-nondirectory file) expected actual))))
 
+(defun ement-e2ee--fetch-sums (base version)
+  "Fetch the SHA256SUMS of the release of VERSION, under BASE.
+Say plainly when there is no such release (yet)."
+  (condition-case err
+      (ement-e2ee--fetch (concat base "SHA256SUMS"))
+    (error
+     (if (string-match-p (rx "returned error: 404") (error-message-string err))
+         (user-error "Ement-e2ee: ement-e2ee %s has no release at %s yet; its binaries \
+may still be building: try again in a few minutes, or build it with M-x ement-e2ee-install"
+                     version base)
+       (signal (car err) (cdr err))))))
+
 (defun ement-e2ee--download (target version)
   "Download the release binary of VERSION for TARGET; return its path.
 It goes where `ement-e2ee--managed-binary' says, and only once
@@ -365,10 +405,10 @@ its checksum matches the release's SHA256SUMS."
          (binary (ement-e2ee--managed-binary version))
          (part (concat binary ".part"))
          (done nil))
-    (make-directory (file-name-directory binary) t)
     (unwind-protect
         (let ((expected (ement-e2ee--expected-sha256
-                         (ement-e2ee--fetch (concat base "SHA256SUMS")) asset)))
+                         (ement-e2ee--fetch-sums base version) asset)))
+          (make-directory (file-name-directory binary) t)
           (message "Ement-e2ee: downloading %s..." asset)
           (when (file-exists-p part)
             (delete-file part))
@@ -439,6 +479,31 @@ Packages installed from Git (package-vc, straight, elpaca) have it."
       (run-at-time 0 nil #'ement-e2ee-install)
     (message "Ement-e2ee: the build failed; see the *ement-e2ee build* buffer")))
 
+(defun ement-e2ee--older-version ()
+  "Return the newest installed ement-e2ee older than this package needs, or nil.
+That is one `ement-e2ee-install' got, or one on variable `exec-path'."
+  (let ((versions (cons (when-let ((found (executable-find "ement-e2ee")))
+                          (ement-e2ee--binary-version found))
+                        (cl-loop for directory in (ement-e2ee--old-binary-directories)
+                                 for version = (file-name-nondirectory directory)
+                                 when (file-executable-p (ement-e2ee--managed-binary version))
+                                 collect version))))
+    (car (sort (cl-remove-if-not
+                (lambda (version) (ement-e2ee--version< version ement-e2ee-binary-version))
+                versions)
+               (lambda (a b) (ement-e2ee--version< b a))))))
+
+(defun ement-e2ee--obtain-question ()
+  "Return the question `ement-e2ee--obtain-binary' asks."
+  (let ((older (ement-e2ee--older-version)))
+    (cond ((file-executable-p (ement-e2ee--managed-binary))
+           (format "Get ement-e2ee %s again?" ement-e2ee-binary-version))
+          (older
+           (format "ement-e2ee.el now needs ement-e2ee %s (installed: %s).  Get it?"
+                   ement-e2ee-binary-version older))
+          (t
+           (format "ement-e2ee %s is not installed.  Get it?" ement-e2ee-binary-version)))))
+
 (defun ement-e2ee--obtain-binary (no-ask)
   "Download or build the binary, asking which unless NO-ASK.
 Return the binary's path, or `building' while cargo builds it."
@@ -453,12 +518,25 @@ Return the binary's path, or `building' while cargo builds it."
                   system-configuration))
     (pcase (if no-ask
                (car choices)
-             (read-multiple-choice
-              (format "ement-e2ee %s is not installed.  Get it?" ement-e2ee-binary-version)
-              choices))
+             (read-multiple-choice (ement-e2ee--obtain-question) choices))
       (`(?d . ,_) (ement-e2ee--download target ement-e2ee-binary-version))
       (`(?b . ,_) (ement-e2ee--build cargo) 'building)
       (_ (user-error "Ement-e2ee: nothing installed")))))
+
+(defun ement-e2ee--delete-superseded-binaries ()
+  "Delete the binaries `ement-e2ee-install' got for older versions.
+This package runs none of them, and a proxy of the version it
+needs, once started, has marked the store as used by that
+version: older ones refuse to start there."
+  (when-let ((old (ement-e2ee--old-binary-directories)))
+    (condition-case err
+        (progn
+          (dolist (directory old)
+            (delete-directory directory t))
+          (ement-e2ee--log-note "deleted the binaries of ement-e2ee %s"
+                                (mapconcat #'file-name-nondirectory old ", ")))
+      (error (ement-e2ee--log-note "could not delete older binaries: %s"
+                                   (error-message-string err))))))
 
 ;;;; Configuration
 
@@ -690,10 +768,14 @@ proxy started on its port then fails, and says why."
     (`(proxy . ,body) (eql (alist-get 'pid body) (process-id process)))))
 
 (defun ement-e2ee--mark-ready (process)
-  "Note that PROCESS answers, and supervise it from now on."
+  "Note that PROCESS answers, and supervise it from now on.
+A proxy of the version this package needs makes the binaries of
+older ones useless: delete them."
   (process-put process 'ready t)
   (process-put process 'supervised t)
-  (ement-e2ee--log-note "answering on %s" ement-e2ee--url))
+  (ement-e2ee--log-note "answering on %s" ement-e2ee--url)
+  (when (ement-e2ee--new-enough-p (process-get process 'version))
+    (ement-e2ee--delete-superseded-binaries)))
 
 (defun ement-e2ee--drain (process)
   "Read what PROCESS has still written."
@@ -999,19 +1081,21 @@ Turning the mode off leaves a running proxy alone (see
   "Get the ement-e2ee proxy ready and route ement through it.
 Download or build the binary if there is none (with prefix
 argument FORCE, even if there is), write the proxy's config if
-it has none, and turn on `ement-e2ee-mode', offering to keep it
-on in future sessions.  Safe to run again."
+it has none, and turn on `ement-e2ee-mode' if it is off,
+offering to keep it on in future sessions.  Safe to run again."
   (interactive "P")
   (let ((binary (or (and (not force) (ement-e2ee--locate-binary))
                     (ement-e2ee--obtain-binary nil))))
     (when (stringp binary)
       (ement-e2ee--ensure-config binary)
+      ;; A mode already on is on by the user's own arrangement (an init
+      ;; file, say): no offer then, as after every build of an upgrade.
       (unless ement-e2ee-mode
-        (ement-e2ee-mode 1))
-      (when (and (not (equal (get 'ement-e2ee-mode 'saved-value) '(t)))
-                 (y-or-n-p "Turn on `ement-e2ee-mode' in future Emacs sessions too \
+        (ement-e2ee-mode 1)
+        (when (and (not (equal (get 'ement-e2ee-mode 'saved-value) '(t)))
+                   (y-or-n-p "Turn on `ement-e2ee-mode' in future Emacs sessions too \
 \(saved with Customize)? "))
-        (customize-save-variable 'ement-e2ee-mode t))
+          (customize-save-variable 'ement-e2ee-mode t)))
       (message "Ement-e2ee: ready; M-x ement-connect goes through the proxy"))))
 
 ;;;###autoload
@@ -1067,16 +1151,10 @@ Stop it anyway? " pid)))
   (ement-e2ee--resume-syncs))
 
 (defun ement-e2ee-delete-old-binaries ()
-  "Delete the binaries `ement-e2ee-install' got for older versions."
+  "Delete the binaries `ement-e2ee-install' got for older versions.
+Starting a proxy of the version this package needs does so too."
   (interactive)
-  (let ((old (and (file-directory-p ement-e2ee-binary-directory)
-                  (cl-loop for directory in (directory-files ement-e2ee-binary-directory
-                                                             t (rx bos digit))
-                           for version = (file-name-nondirectory directory)
-                           when (and (file-directory-p directory)
-                                     (ement-e2ee--version< version
-                                                           ement-e2ee-binary-version))
-                           collect directory))))
+  (let ((old (ement-e2ee--old-binary-directories)))
     (cond ((null old)
            (message "Ement-e2ee: no old binaries"))
           ((yes-or-no-p (format "Delete ement-e2ee %s? "

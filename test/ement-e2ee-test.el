@@ -187,6 +187,77 @@ store_dir = \"%s\"\n%s\n"
       (let ((ement-e2ee-program (expand-file-name "missing/ement-e2ee" dir)))
         (should-error (ement-e2ee--locate-binary) :type 'user-error)))))
 
+(ert-deftest ement-e2ee-test-old-binaries ()
+  (ement-e2ee-test--with-temp-dir dir
+    (let* ((ement-e2ee-binary-directory (expand-file-name "managed/" dir))
+           (ement-e2ee-binary-version "0.18.0")
+           (exec-path nil)
+           (managed (lambda (version) (ement-e2ee--managed-binary version))))
+      (should-not (ement-e2ee--old-binary-directories))
+      (should-not (ement-e2ee--older-version))
+      ;; Downloaded; built by cargo; a download that failed half-way.
+      (ement-e2ee-test--fake-binary (funcall managed "0.17.0") "0.17.0")
+      (ement-e2ee-test--fake-binary (funcall managed "0.17.1") "0.17.1")
+      (dolist (record '(".crates.toml" ".crates2.json"))
+        (write-region "" nil (expand-file-name (concat "0.17.1/" record)
+                                               ement-e2ee-binary-directory)))
+      (make-directory (expand-file-name "0.16.0/bin" ement-e2ee-binary-directory) t)
+      (write-region "" nil (concat (funcall managed "0.16.0") ".part"))
+      ;; Not old, or not this package's.
+      (ement-e2ee-test--fake-binary (funcall managed "0.18.0") "0.18.0")
+      (ement-e2ee-test--fake-binary (funcall managed "0.19.0") "0.19.0")
+      (make-directory (expand-file-name "0.17.5" ement-e2ee-binary-directory) t)
+      (write-region "" nil (expand-file-name "0.17.5/notes.txt" ement-e2ee-binary-directory))
+      (should (equal (mapcar #'file-name-nondirectory (ement-e2ee--old-binary-directories))
+                     '("0.16.0" "0.17.0" "0.17.1")))
+      (should (equal (ement-e2ee--older-version) "0.17.1"))
+      ;; An older one on PATH counts too, a new enough one does not.
+      (let ((exec-path (list (expand-file-name "path/" dir))))
+        (ement-e2ee-test--fake-binary (expand-file-name "path/ement-e2ee" dir) "0.17.9")
+        (should (equal (ement-e2ee--older-version) "0.17.9"))
+        (ement-e2ee-test--fake-binary (expand-file-name "path/ement-e2ee" dir) "0.18.1")
+        (should (equal (ement-e2ee--older-version) "0.17.1")))
+      (ement-e2ee--delete-superseded-binaries)
+      (should (equal (directory-files ement-e2ee-binary-directory nil (rx bos digit))
+                     '("0.17.5" "0.18.0" "0.19.0")))
+      (should (file-exists-p (expand-file-name "0.17.5/notes.txt" ement-e2ee-binary-directory))))))
+
+(ert-deftest ement-e2ee-test-obtain-question ()
+  (ement-e2ee-test--with-temp-dir dir
+    (let ((ement-e2ee-binary-directory (expand-file-name "managed/" dir))
+          (ement-e2ee-binary-version "0.18.0")
+          (exec-path nil))
+      (should (equal (ement-e2ee--obtain-question)
+                     "ement-e2ee 0.18.0 is not installed.  Get it?"))
+      ;; After an upgrade of this package.
+      (ement-e2ee-test--fake-binary (ement-e2ee--managed-binary "0.17.0") "0.17.0")
+      (should (equal (ement-e2ee--obtain-question)
+                     "ement-e2ee.el now needs ement-e2ee 0.18.0 (installed: 0.17.0).  Get it?"))
+      ;; C-u M-x ement-e2ee-install.
+      (ement-e2ee-test--fake-binary (ement-e2ee--managed-binary) "0.18.0")
+      (should (equal (ement-e2ee--obtain-question) "Get ement-e2ee 0.18.0 again?")))))
+
+(ert-deftest ement-e2ee-test-install-offers-customize-only-when-turning-the-mode-on ()
+  (ement-e2ee-test--with-temp-dir dir
+    (let ((ement-e2ee-program
+           (ement-e2ee-test--fake-binary (expand-file-name "ement-e2ee" dir) "0.18.0"))
+          (ement-e2ee-binary-version "0.18.0")
+          (asked 0))
+      (cl-letf (((symbol-function 'ement-e2ee--ensure-config) #'ignore)
+                ((symbol-function 'y-or-n-p) (lambda (_) (cl-incf asked) nil))
+                ((symbol-function 'customize-save-variable)
+                 (lambda (&rest _) (error "Saved with Customize"))))
+        ;; On already, from an init file, say; or after a build.
+        (let ((ement-e2ee-mode t))
+          (ement-e2ee-install))
+        (should (= asked 0))
+        (let ((ement-e2ee-mode nil))
+          (unwind-protect
+              (progn (ement-e2ee-install)
+                     (should ement-e2ee-mode))
+            (ement-e2ee-mode -1)))
+        (should (= asked 1))))))
+
 ;;;; Download
 
 (defconst ement-e2ee-test--target "x86_64-unknown-linux-musl"
@@ -264,6 +335,23 @@ whose text is SUMS if given."
                    (expand-file-name "releases/v0.18.1" dir))
       (should-error (ement-e2ee--download ement-e2ee-test--target "0.18.1"))
       (should-not (file-exists-p (ement-e2ee--managed-binary "0.18.1"))))))
+
+(ert-deftest ement-e2ee-test-download-of-an-unpublished-release-says-so ()
+  (ement-e2ee-test--with-temp-dir dir
+    (let ((ement-e2ee-binary-directory (expand-file-name "managed/" dir))
+          (curl-error "curl: (22) The requested URL returned error: 404"))
+      ;; What GitHub answers for a release that is not there (yet).
+      (cl-letf (((symbol-function 'ement-e2ee--fetch)
+                 (lambda (url &rest _) (error "Could not fetch %s: %s" url curl-error))))
+        (let ((error (should-error (ement-e2ee--download ement-e2ee-test--target "0.18.1")
+                                   :type 'user-error)))
+          (should (string-match-p "ement-e2ee 0.18.1 has no release at .* yet" (cadr error))))
+        ;; Any other failure is passed on as it is.
+        (setq curl-error "curl: (6) Could not resolve host: github.com")
+        (let ((error (should-error (ement-e2ee--download ement-e2ee-test--target "0.18.1"))))
+          (should (string-match-p "Could not resolve host" (cadr error)))))
+      ;; Not even an empty directory for that version.
+      (should-not (file-exists-p (expand-file-name "0.18.1" ement-e2ee-binary-directory))))))
 
 ;;;; Build
 
@@ -426,6 +514,8 @@ more config."
                   (,config-var (ement-e2ee-test--write-config ,dir ,port-var ,extra))
                   (ement-e2ee-program ement-e2ee-test--program)
                   (ement-e2ee-config-file ,config-var)
+                  ;; A started proxy deletes older binaries here.
+                  (ement-e2ee-binary-directory (expand-file-name "managed/" ,dir))
                   (ement-e2ee-binary-version (ement-e2ee--binary-version
                                               ement-e2ee-test--program)))
              ,@body))))))
@@ -461,6 +551,32 @@ more config."
       (should-not ement-e2ee--process)
       (should-not (timerp ement-e2ee--restart-timer))
       (should (eq (ement-e2ee--probe url) 'nothing)))))
+
+(ert-deftest ement-e2ee-test-proxy-older-than-needed-is-replaced ()
+  ;; This package was upgraded, and reloaded, while its proxy ran.
+  (ement-e2ee-test--with-proxy config port nil
+    (ignore config port)
+    (let* ((url (ement-e2ee--ensure))
+           (old ement-e2ee--process))
+      (process-put old 'version "0.0.1")
+      (should (equal (ement-e2ee--ensure) url))
+      (should-not (process-live-p old))
+      (should (process-live-p ement-e2ee--process))
+      (should-not (eq ement-e2ee--process old))
+      (should (process-get ement-e2ee--process 'ready))
+      (should (eq (car (ement-e2ee--probe url)) 'proxy)))))
+
+(ert-deftest ement-e2ee-test-proxy-start-deletes-older-binaries ()
+  (ement-e2ee-test--with-proxy config port nil
+    (ignore config port)
+    (let ((old (ement-e2ee-test--fake-binary (ement-e2ee--managed-binary "0.0.1") "0.0.1"))
+          (newer (ement-e2ee-test--fake-binary (ement-e2ee--managed-binary "99.0.0") "99.0.0")))
+      (ement-e2ee--ensure)
+      (should-not (file-exists-p (file-name-directory (directory-file-name
+                                                       (file-name-directory old)))))
+      (should (file-exists-p newer))
+      (should (string-match-p "deleted the binaries of ement-e2ee 0.0.1"
+                              (ement-e2ee-test--log))))))
 
 (ert-deftest ement-e2ee-test-proxy-is-restarted-after-kill ()
   (ement-e2ee-test--with-proxy config port nil

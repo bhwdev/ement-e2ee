@@ -126,6 +126,13 @@ cargo build only. Native Windows is not supported; WSL is.
   automatically.
 - Turning the mode off leaves a running proxy alone; ement's saved sessions
   keep pointing at it.
+- After an update of the package, the first ~ement-connect~ gets the binary
+  the new version needs, as ~ement-e2ee-auto-install~ says (by default it
+  asks, naming the version installed), and restarts a proxy this Emacs runs
+  with it, or replaces an older one found running, after asking. Once the
+  new proxy answers, the older binaries under ~ement-e2ee-binary-directory~
+  are deleted: it has marked the store as its own, so they would refuse to
+  start there anyway. The config, and the store with its device, are kept.
 
 Commands:
 
@@ -397,17 +404,26 @@ ement-e2ee 0.19.x is built on matrix-sdk-crypto 0.19.
 1. In one commit, set the same version in =Cargo.toml= (~version~, then
    ~cargo build~ to update =Cargo.lock=), in =ement-e2ee.el='s
    ~;; Version:~ header and in its ~ement-e2ee-binary-version~.
-2. Tag that commit ~vX.Y.Z~ and push the tag. The release workflow
+2. Tag that commit ~vX.Y.Z~ and push the tag alone
+   (~git push origin vX.Y.Z~). The release workflow
    (=.github/workflows/release.yml=) checks that the three versions and the
    tag agree, runs the tests, builds the binaries, writes =SHA256SUMS=,
-   attests the binaries' provenance and publishes the GitHub release.
-   Pushing the tag is the only manual step. Run the workflow by hand with
-   ~dry_run~ to build the binaries as workflow artifacts, without a release.
+   attests the binaries' provenance and publishes the GitHub release. Run
+   the workflow by hand with ~dry_run~ to build the binaries as workflow
+   artifacts, without a release.
+3. Once the release is published, push main. Do not rewrite the tagged
+   commit afterwards: the tag has to stay on main.
 
 Whoever installs the package from Git (package-vc, straight, elpaca, MELPA
 unstable) follows the main branch, so the elisp there must always work with
-the binary its ~ement-e2ee-binary-version~ names: raise it only in a release
-commit. MELPA takes the recipe
+the binary its ~ement-e2ee-binary-version~ names, and that binary must be
+downloadable: raise the version only in a release commit, and let main reach
+that commit only after its release is out (step 3). Pushed earlier, main
+sends everyone who updates meanwhile to a release that is not there (they
+are told to try again later). The config must stay readable by newer
+versions too, since an update keeps it and unknown keys are an error
+(~deny_unknown_fields~): give a renamed key a serde alias for its old name,
+and keep accepting a dropped one. MELPA takes the recipe
 ~(ement-e2ee :fetcher github :repo "bhwdev/ement-e2ee" :files ("ement-e2ee.el"))~.
 
 * Licence
