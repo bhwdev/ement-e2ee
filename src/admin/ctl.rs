@@ -141,7 +141,7 @@ pub async fn run_command(client: &Client, command: CtlCommand) -> anyhow::Result
     match command {
         CtlCommand::Status => {
             let resp = client.get("status").await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            println!("{}", terminal_safe(&serde_json::to_string_pretty(&resp)?));
         }
         CtlCommand::Bootstrap {
             user_id,
@@ -160,7 +160,7 @@ pub async fn run_command(client: &Client, command: CtlCommand) -> anyhow::Result
                 body["user_id"] = user_id.into();
             }
             let resp = client.post("bootstrap", &body).await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            println!("{}", terminal_safe(&serde_json::to_string_pretty(&resp)?));
         }
         CtlCommand::Verify(VerifyArgs {
             action: Some(action),
@@ -176,6 +176,7 @@ pub async fn run_command(client: &Client, command: CtlCommand) -> anyhow::Result
             };
             let flow = verify::run(client, &mut verify::TerminalUi, &options).await?;
             let other = flow["other_device"].as_str().unwrap_or("the other device");
+            let other = terminal_safe(other);
             println!("\n✓ Verified: this device and {other} now trust each other.");
         }
         CtlCommand::Keys { action } => run_keys(client, action).await?,
@@ -197,8 +198,7 @@ async fn run_keys(client: &Client, action: KeysAction) -> anyhow::Result<()> {
                 .get("export")
                 .and_then(|v| v.as_str())
                 .context("malformed export response")?;
-            std::fs::write(&file, export)
-                .with_context(|| format!("failed to write {}", file.display()))?;
+            crate::secret::write_private(&file, export.as_bytes())?;
             println!(
                 "Exported {} room keys to {}",
                 resp.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -214,7 +214,7 @@ async fn run_keys(client: &Client, action: KeysAction) -> anyhow::Result<()> {
                 body["user_id"] = user_id.into();
             }
             let resp = client.post("keys/import", &body).await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            println!("{}", terminal_safe(&serde_json::to_string_pretty(&resp)?));
         }
     }
     Ok(())
@@ -253,12 +253,32 @@ fn print_flow(value: &serde_json::Value) {
         .and_then(|v| v.as_str())
     {
         println!("\nCompare these emoji with the other device:\n");
-        println!("{formatted}\n");
+        println!("{}\n", terminal_safe(formatted));
     }
     println!(
         "{}",
-        serde_json::to_string_pretty(value).unwrap_or_default()
+        terminal_safe(&serde_json::to_string_pretty(value).unwrap_or_default())
     );
+}
+
+/// `text` with the control characters a terminal would act on (escape
+/// sequences that move the cursor, retitle the window, set the clipboard)
+/// replaced: what the proxy answers carries strings other people chose,
+/// such as device names, log lines and event fields.
+pub fn terminal_safe(text: &str) -> std::borrow::Cow<'_, str> {
+    let acted_on = |c: char| c.is_control() && c != '\n' && c != '\t';
+    if !text.chars().any(acted_on) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    text.chars()
+        .map(|c| {
+            if acted_on(c) {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 async fn run_verify(client: &Client, action: VerifyAction) -> anyhow::Result<()> {
@@ -267,7 +287,7 @@ async fn run_verify(client: &Client, action: VerifyAction) -> anyhow::Result<()>
             let resp = client
                 .get(&format!("verify{}", common_query(&common)))
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            println!("{}", terminal_safe(&serde_json::to_string_pretty(&resp)?));
         }
         VerifyAction::Start { device, common } => {
             let mut body = common_body(&common);
@@ -276,7 +296,7 @@ async fn run_verify(client: &Client, action: VerifyAction) -> anyhow::Result<()>
             print_flow(&resp);
             println!("\nNow accept the request on the other device, then run:");
             if let Some(flow) = resp.get("flow_id").and_then(|v| v.as_str()) {
-                println!("  ement-e2ee ctl verify show {flow}");
+                println!("  ement-e2ee ctl verify show {}", terminal_safe(flow));
             }
         }
         VerifyAction::Show { flow, common } => {
@@ -348,6 +368,11 @@ impl Client {
             base: format!("{}/_ement", proxy.trim_end_matches('/')),
             http: reqwest::Client::builder()
                 .connect_timeout(connect_timeout)
+                // The proxy is local, and what goes to it (the admin token,
+                // a recovery key) is not for an HTTP proxy that HTTP_PROXY
+                // or ALL_PROXY may name.
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to set up the HTTP client"),
             admin_token,
@@ -383,8 +408,9 @@ impl Client {
                 .unwrap_or("unknown error");
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 anyhow::bail!(
-                    "{status}: {message} (ctl reads `admin_token` from the config file; \
-                     pass --config if the proxy uses a different one)"
+                    "{status}: {message} (ctl takes the token from the config file's \
+                     `admin_token`, or else from the store directory it names; pass --config \
+                     if the proxy uses a different one)"
                 );
             }
             anyhow::bail!("{status}: {message}");
@@ -476,6 +502,20 @@ mod tests {
         assert!(error.contains("ement-e2ee serve"), "{error}");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         drop(listener);
+    }
+
+    #[test]
+    fn terminal_controls_are_defused() {
+        assert_eq!(terminal_safe("plain\ttext\nlines"), "plain\ttext\nlines");
+        assert!(matches!(
+            terminal_safe("Pixel 8"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // An OSC 52 clipboard write, a CSI cursor move (7- and 8-bit), DEL.
+        assert_eq!(
+            terminal_safe("a\u{1b}]52;c;cm0gLXJm\u{7}b\u{1b}[2Jc\u{9b}2Jd\u{7f}"),
+            "a�]52;c;cm0gLXJm�b�[2Jc�2Jd�"
+        );
     }
 
     #[test]

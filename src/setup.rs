@@ -36,6 +36,8 @@ pub struct SetupArgs {
 pub async fn run(args: SetupArgs) -> anyhow::Result<()> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        // Where the homeserver is must not be learnt in the clear.
+        .redirect(crate::upstream::https_only_redirects())
         .build()?;
 
     let user_id = match (&args.user_id, &args.homeserver) {
@@ -185,8 +187,9 @@ homeserver = "{homeserver}"
 # store_passphrase_command = "pass show ement-e2ee/store"
 # store_passphrase = "..."
 
-# Optional: require a token on the /_ement admin API (`ement-e2ee ctl` reads
-# it from this file).
+# Optional: the token the /_ement admin API requires. Without it, the proxy
+# draws a new one each time it starts and writes it to .admin-token in the
+# store directory, where `ement-e2ee ctl` and Emacs find it.
 # admin_token = "..."
 "#
     )
@@ -194,22 +197,7 @@ homeserver = "{homeserver}"
 
 /// Write the config, readable by the owner only: it may hold secrets.
 pub fn write_config(path: &Path, contents: &str) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    file.write_all(contents.as_bytes())?;
-    Ok(())
+    crate::secret::write_private(path, contents.as_bytes())
 }
 
 fn exe_path() -> anyhow::Result<PathBuf> {

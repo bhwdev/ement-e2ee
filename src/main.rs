@@ -4,6 +4,7 @@ mod crypto;
 mod error;
 mod logbuf;
 mod proxy;
+mod secret;
 mod session;
 mod setup;
 mod store_guard;
@@ -132,9 +133,12 @@ fn info(args: &InfoArgs) -> anyhow::Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    // Whatever the proxy creates (crypto stores, media keys, the token
+    // file) is its owner's alone.
+    secret::restrict_new_files();
     let config = Config::load(&args)?;
     // Before any store is opened or the port bound.
-    let _store_guard = store_guard::claim(&config.store_dir)?;
+    let store_guard = store_guard::claim(&config.store_dir)?;
 
     // Two sinks: stdout, filtered by the configured level (changeable at
     // runtime through `ctl debug log-level`), and an in-memory tail of the
@@ -166,12 +170,22 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     });
 
     tracing::info!(listen = %config.listen, homeserver = %config.homeserver, "starting ement-e2ee");
+    if let Some(mode) = store_guard.tightened_from {
+        tracing::warn!(
+            store_dir = %config.store_dir.display(),
+            "the store directory was accessible to other users (mode {mode:o}); it is 700 now"
+        );
+    }
+    if let Some(warning) = config::exposed_secrets_warning(&args, &config) {
+        tracing::warn!("{warning}");
+    }
 
     let mut state = proxy::AppState::new(Arc::new(config)).await?;
     state.logs = logs;
     state.log_control = Some(log_control);
+    // Before the port opens: whoever finds the proxy there may ask for it.
+    secret::write_token_file(&state.config.store_dir, &state.admin_token)?;
     let listen = state.config.listen;
-    let router = proxy::router(state);
 
     // Listening for signals before the port opens: whoever sees it open may
     // signal at once, and a signal without a handler kills the process.
@@ -179,6 +193,8 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind {listen}"))?;
+    state.reached_at = config::connect_addr(listener.local_addr()?);
+    let router = proxy::router(state);
 
     // Stop accepting on a shutdown signal and let in-flight requests finish,
     // but not forever: ement's /sync long-polls would hold the process open

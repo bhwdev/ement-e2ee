@@ -529,13 +529,15 @@ fn ctl_finds_the_proxy_and_its_token_through_the_config() {
     assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(status["sessions"], serde_json::json!([]));
 
-    // A config without the token is turned away, and told why.
+    // A config without the token, or a store with it, is turned away, and
+    // told why.
     let other_config = proxy.dir.path().join("no-token.toml");
     std::fs::write(
         &other_config,
         format!(
-            "listen = \"127.0.0.1:{}\"\nhomeserver = \"http://127.0.0.1:1\"\n",
-            proxy.port
+            "listen = \"127.0.0.1:{}\"\nhomeserver = \"http://127.0.0.1:1\"\nstore_dir = \"{}\"\n",
+            proxy.port,
+            proxy.dir.path().join("elsewhere").display()
         ),
     )
     .unwrap();
@@ -549,6 +551,30 @@ fn ctl_finds_the_proxy_and_its_token_through_the_config() {
     let error = stderr(&output);
     assert!(error.contains("401"), "{error}");
     assert!(error.contains("admin_token"), "{error}");
+}
+
+#[test]
+fn without_a_configured_token_the_proxy_draws_one() {
+    let proxy = Proxy::start_offline("");
+    // The admin API is closed all the same ...
+    assert_eq!(http_get(proxy.port, "/_ement/status").0, 401);
+    // ... and ctl finds the token where the proxy wrote it.
+    let output = proxy.ctl(&["status"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let store = proxy.dir.path().join("store");
+    let token = std::fs::read_to_string(store.join(".admin-token")).unwrap();
+    assert_eq!(token.trim().len(), 64);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&store), 0o700);
+        assert_eq!(mode(&store.join(".admin-token")), 0o600);
+        // Everything else the proxy made is private too (umask).
+        assert_eq!(mode(&store.join(".lock")), 0o600);
+        assert_eq!(mode(&store.join(".version")), 0o600);
+    }
 }
 
 #[test]

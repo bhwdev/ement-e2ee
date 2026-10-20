@@ -778,9 +778,21 @@ pub async fn event(
     match decrypt::decrypt(ctx, room_id, &raw).await {
         Decryption::Decrypted(plain) => {
             report["outcome"] = "decrypted".into();
-            report["decrypted_type"] = plain["type"].clone();
             report["encryption_info"] = plain["unsigned"]["ement_e2ee"]["encryption_info"].clone();
-            report["explanation"] = "the event decrypts".into();
+            match plain["unsigned"]["ement_e2ee"]["ignored_type"].as_str() {
+                Some(ignored) => {
+                    report["decrypted_type"] = ignored.into();
+                    report["explanation"] = format!(
+                        "the event decrypts, to a {ignored} event: a type only the homeserver \
+                         may send, so ement is shown a notice in its place"
+                    )
+                    .into();
+                }
+                None => {
+                    report["decrypted_type"] = plain["type"].clone();
+                    report["explanation"] = "the event decrypts".into();
+                }
+            }
         }
         Decryption::Undecryptable {
             reason, session_id, ..

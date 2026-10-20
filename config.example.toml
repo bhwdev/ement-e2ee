@@ -3,7 +3,8 @@
 # Where the proxy listens; point (ement-connect :uri-prefix ...) here.
 listen = "127.0.0.1:8009"
 
-# Your real homeserver (the client-server API base URL).
+# Your real homeserver (the client-server API base URL). https, unless the
+# homeserver runs on this machine.
 homeserver = "https://matrix.example.org"
 
 # Where crypto stores and media key caches live (a leading ~ is expanded).
@@ -18,6 +19,8 @@ homeserver = "https://matrix.example.org"
 # store_passphrase_command = "pass show ement-e2ee/store"
 # store_passphrase = "..."
 
-# Optional: require `Authorization: Bearer <token>` on the /_ement admin API.
-# `ement-e2ee ctl` reads the token (and `listen`) from this file.
+# Optional: the token the /_ement admin API requires
+# (`Authorization: Bearer <token>`). Without it, the proxy draws a new one
+# each time it starts and writes it to .admin-token in store_dir; either way
+# `ement-e2ee ctl` finds it (and `listen`) through this file.
 # admin_token = "..."

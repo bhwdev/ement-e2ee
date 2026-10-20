@@ -1059,9 +1059,10 @@ impl HarnessBuilder {
             store_passphrase: None,
             admin_token: self.admin_token,
         };
-        let state = AppState::new(Arc::new(config)).await.unwrap();
+        let mut state = AppState::new(Arc::new(config)).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        state.reached_at = listener.local_addr().unwrap();
+        let url = format!("http://{}", state.reached_at);
         let router = proxy::router(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         Harness {
@@ -1105,11 +1106,29 @@ impl Harness {
 
     /// An admin API client for this proxy, as `ctl` would build it.
     pub fn ctl(&self) -> crate::admin::ctl::Client {
-        crate::admin::ctl::Client::new(&self.url, self.state.config.admin_token.clone())
+        crate::admin::ctl::Client::new(&self.url, Some(self.state.admin_token.to_string()))
     }
 
     /// Send a request through the proxy; returns (status, JSON body or Null).
+    /// Without a token, a request to the admin API gets the proxy's admin
+    /// token, as `ctl` would send it.
     pub async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&Value>,
+    ) -> (u16, Value) {
+        let admin_token = path
+            .starts_with("/_ement")
+            .then_some(&*self.state.admin_token);
+        self.request_as(method, path, token.or(admin_token), body)
+            .await
+    }
+
+    /// `request`, with nothing but the given token: for tests of the admin
+    /// API's guard.
+    pub async fn request_as(
         &self,
         method: Method,
         path: &str,

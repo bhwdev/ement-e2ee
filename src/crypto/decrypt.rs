@@ -176,6 +176,7 @@ pub(crate) async fn decrypt(
                 tracing::error!("decrypted event is not a JSON object");
                 return Decryption::Untouched;
             };
+            confine_to_envelope(event, new_object);
             let new_unsigned = new_object.entry("unsigned").or_insert_with(|| json!({}));
             if let Some(new_unsigned) = new_unsigned.as_object_mut() {
                 for (key, value) in original_unsigned.unwrap_or_default() {
@@ -189,6 +190,18 @@ pub(crate) async fn decrypt(
                             .unwrap_or(Value::Null),
                     }),
                 );
+            }
+
+            let decrypted_type = new_event["type"].as_str().unwrap_or_default();
+            if forgeable_type(decrypted_type) {
+                tracing::warn!(
+                    %room_id,
+                    sender = %new_event["sender"],
+                    event_type = decrypted_type,
+                    "ignored an encrypted event of a type only the homeserver may send"
+                );
+                let ignored = ignored_placeholder(&new_event, decrypted_type);
+                return Decryption::Decrypted(ignored);
             }
 
             maybe_feed_verification(ctx, &new_event).await;
@@ -206,6 +219,94 @@ pub(crate) async fn decrypt(
             Decryption::Untouched
         }
     }
+}
+
+/// Keep of a decrypted payload its type and content only. Anything else
+/// its sender put next to them (a `state_key`, `redacts`, `prev_content`)
+/// would pass for the homeserver's word, and ement acts on such fields.
+/// Sender, event ID and timestamp are the envelope's already (matrix-sdk-
+/// crypto copied them over), as is the room, which it checked. So is the
+/// relation, here: the homeserver aggregates by the one in the clear, and
+/// so does Element; one inside could, say, make a message an edit of
+/// someone else's for ement alone.
+fn confine_to_envelope(envelope: &Value, decrypted: &mut serde_json::Map<String, Value>) {
+    decrypted.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "type"
+                | "content"
+                | "sender"
+                | "event_id"
+                | "origin_server_ts"
+                | "room_id"
+                | "unsigned"
+        )
+    });
+    if let Some(content) = decrypted.get_mut("content").and_then(Value::as_object_mut) {
+        match envelope.pointer("/content/m.relates_to") {
+            Some(relation) => {
+                content.insert("m.relates_to".to_owned(), relation.clone());
+            }
+            None => {
+                content.remove("m.relates_to");
+            }
+        }
+    }
+}
+
+/// Is this an event type only the homeserver may deliver (state,
+/// redactions, receipts, typing, account data)? Never encrypted by honest
+/// clients; encrypted, any member of the room could forge it, and ement
+/// acts on these wherever they appear: it would rename the room, change
+/// who is a member and what they are called, or hide others' messages.
+fn forgeable_type(event_type: &str) -> bool {
+    (event_type.starts_with("m.room.") && event_type != "m.room.message")
+        || event_type.starts_with("m.space.")
+        || event_type.starts_with("org.matrix.msc3015.")
+        || matches!(
+            event_type,
+            "m.typing"
+                | "m.receipt"
+                | "m.read"
+                | "m.fully_read"
+                | "m.presence"
+                | "m.tag"
+                | "m.direct"
+                | "m.ignored_user_list"
+                | "m.push_rules"
+        )
+}
+
+/// What the client gets for a decrypted event of a forgeable type: a notice
+/// saying so, in its place.
+fn ignored_placeholder(decrypted: &Value, event_type: &str) -> Value {
+    let mut placeholder = json!({
+        "type": "m.room.message",
+        "content": {
+            "msgtype": "m.notice",
+            "body": format!(
+                "🔒 [ignored: an encrypted {event_type} event, which only the homeserver may send]"
+            ),
+        },
+    });
+    for key in [
+        "event_id",
+        "sender",
+        "origin_server_ts",
+        "room_id",
+        "unsigned",
+    ] {
+        if let Some(value) = decrypted.get(key) {
+            placeholder[key] = value.clone();
+        }
+    }
+    if let Some(marker) = placeholder
+        .pointer_mut("/unsigned/ement_e2ee")
+        .and_then(Value::as_object_mut)
+    {
+        marker.insert("ignored_type".to_owned(), event_type.into());
+    }
+    placeholder
 }
 
 async fn decrypt_event(
@@ -347,6 +448,134 @@ async fn maybe_request_room_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decrypted_payloads_keep_only_type_and_content() {
+        let envelope = json!({
+            "type": "m.room.encrypted",
+            "event_id": "$abc",
+            "sender": "@mallory:example.org",
+            "content": { "algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "..." },
+        });
+        // What matrix-sdk-crypto makes of a payload Mallory wrote.
+        let mut decrypted = json!({
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "hi",
+                "m.relates_to": { "rel_type": "m.replace", "event_id": "$alices" },
+            },
+            "state_key": "@alice:example.org",
+            "redacts": "$alices",
+            "prev_content": { "membership": "join" },
+            "room_id": "!room:example.org",
+            "sender": "@mallory:example.org",
+            "event_id": "$abc",
+            "origin_server_ts": 1,
+            "unsigned": { "age": 5 },
+        });
+        confine_to_envelope(&envelope, decrypted.as_object_mut().unwrap());
+        let keys: std::collections::BTreeSet<&str> = decrypted
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "content",
+                "event_id",
+                "origin_server_ts",
+                "room_id",
+                "sender",
+                "type",
+                "unsigned"
+            ]
+            .into()
+        );
+        // No relation in the clear: none at all.
+        assert_eq!(
+            decrypted["content"],
+            json!({ "msgtype": "m.text", "body": "hi" })
+        );
+
+        // The relation in the clear is the one that counts.
+        let clear = json!({ "rel_type": "m.annotation", "event_id": "$x", "key": "👍" });
+        let envelope = json!({ "content": { "m.relates_to": clear } });
+        let mut decrypted = json!({
+            "type": "m.reaction",
+            "content": { "m.relates_to": { "rel_type": "m.replace", "event_id": "$y" } },
+        });
+        confine_to_envelope(&envelope, decrypted.as_object_mut().unwrap());
+        assert_eq!(decrypted["content"]["m.relates_to"], clear);
+    }
+
+    #[test]
+    fn homeserver_only_types_are_forgeable() {
+        for event_type in [
+            "m.room.member",
+            "m.room.name",
+            "m.room.topic",
+            "m.room.avatar",
+            "m.room.power_levels",
+            "m.room.redaction",
+            "m.room.tombstone",
+            "m.room.canonical_alias",
+            "m.room.encryption",
+            "m.room.encrypted",
+            "m.room.create",
+            "m.space.child",
+            "m.typing",
+            "m.receipt",
+            "m.read",
+            "m.fully_read",
+            "org.matrix.msc3015.m.room.name.override",
+        ] {
+            assert!(forgeable_type(event_type), "{event_type}");
+        }
+        for event_type in [
+            "m.room.message",
+            "m.reaction",
+            "m.sticker",
+            "m.call.invite",
+            "m.poll.start",
+            "m.key.verification.start",
+            "org.example.custom",
+            "",
+        ] {
+            assert!(!forgeable_type(event_type), "{event_type}");
+        }
+    }
+
+    #[test]
+    fn ignored_events_say_what_they_were() {
+        let decrypted = json!({
+            "type": "m.room.name",
+            "event_id": "$abc",
+            "sender": "@mallory:example.org",
+            "origin_server_ts": 7,
+            "content": { "name": "Pwned" },
+            "unsigned": { "transaction_id": "t1", "ement_e2ee": { "decrypted": true } },
+        });
+        let placeholder = ignored_placeholder(&decrypted, "m.room.name");
+        assert_eq!(placeholder["type"], "m.room.message");
+        assert_eq!(placeholder["content"]["msgtype"], "m.notice");
+        assert!(
+            placeholder["content"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("m.room.name")
+        );
+        assert!(!placeholder.to_string().contains("Pwned"));
+        assert_eq!(placeholder["event_id"], "$abc");
+        assert_eq!(placeholder["sender"], "@mallory:example.org");
+        assert_eq!(placeholder["unsigned"]["transaction_id"], "t1");
+        assert_eq!(
+            placeholder["unsigned"]["ement_e2ee"]["ignored_type"],
+            "m.room.name"
+        );
+    }
 
     #[test]
     fn utd_placeholder_preserves_envelope() {

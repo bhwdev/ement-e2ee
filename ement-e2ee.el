@@ -139,7 +139,10 @@ may wait for a passphrase prompt, so leave time for that."
   :type 'natnum)
 
 (defcustom ement-e2ee-serve-arguments nil
-  "Further arguments to \"ement-e2ee serve\", like (\"--log-level\" \"debug\")."
+  "Further arguments to \"ement-e2ee serve\", like (\"--log-level\" \"debug\").
+Set where the proxy listens and keeps its stores in its config
+file, not here: this package finds the proxy, and checks that it
+is the one it started, by what the config says."
   :type '(repeat string))
 
 (defcustom ement-e2ee-release-url
@@ -170,6 +173,10 @@ The alist its version route answered: name, version, pid.")
 
 (defvar ement-e2ee--url nil
   "The proxy's base URL, as last read from its config.")
+
+(defvar ement-e2ee--token-file nil
+  "The file the proxy writes its admin token to, as last read from its config.
+Only a proxy that can read it proves itself on the version route.")
 
 (defvar ement-e2ee--stopping nil
   "Non-nil while the proxy this Emacs started is being stopped on purpose.")
@@ -354,11 +361,15 @@ only; it runs no store_passphrase_command."
 ;;;; Installation
 
 (defun ement-e2ee--fetch (url &optional file)
-  "Fetch URL with curl into FILE, or return its contents as a string."
+  "Fetch URL with curl into FILE, or return its contents as a string.
+A redirect from an https URL may lead to https only."
   (with-temp-buffer
     (let ((status (apply #'call-process plz-curl-program nil t nil
                          "--fail" "--location" "--silent" "--show-error"
-                         (append (and file (list "--output" file)) (list url)))))
+                         (append (and (string-prefix-p "https://" url)
+                                      (list "--proto-redir" "=https"))
+                                 (and file (list "--output" file))
+                                 (list url)))))
       (unless (eq status 0)
         (error "Could not fetch %s: %s" url (string-trim (buffer-string))))
       (unless file
@@ -724,30 +735,93 @@ update this package, then C-u M-x ement-e2ee-install for version %s or newer."
          (info (ement-e2ee--info program))
          (url (alist-get 'url info))
          (process (ement-e2ee--spawn program (alist-get 'version info) t)))
-    (setq ement-e2ee--url url)
+    (setq ement-e2ee--url url
+          ement-e2ee--token-file (alist-get 'admin_token_file info))
     (ement-e2ee--when-ready process url #'ement-e2ee--resume-syncs)))
+
+(defun ement-e2ee--nonce ()
+  "Return 32 hex digits nobody else can guess."
+  (let ((bytes (with-temp-buffer
+                 (set-buffer-multibyte nil)
+                 (and (file-readable-p "/dev/urandom")
+                      (eq 0 (ignore-errors
+                              (call-process "head" "/dev/urandom" t nil "-c" "16")))
+                      (buffer-string)))))
+    (if (= (length bytes) 16)
+        (mapconcat (lambda (byte) (format "%02x" byte)) bytes "")
+      ;; Emacs seeds `random' from the system's entropy when it starts.
+      (substring (secure-hash 'sha256 (format "%S %S %S %S" (random) (random)
+                                              (current-time) (emacs-pid)))
+                 0 32))))
+
+(defun ement-e2ee--hmac-sha256 (key message)
+  "Return the HMAC-SHA256 (RFC 2104) of MESSAGE under KEY, in hex.
+KEY and MESSAGE are strings of bytes: unibyte, or ASCII."
+  (let* ((key (if (> (length key) 64) (secure-hash 'sha256 key nil nil t) key))
+         (key (concat key (make-string (- 64 (length key)) 0)))
+         (pad (lambda (byte)
+                (apply #'unibyte-string (mapcar (lambda (c) (logxor c byte)) key)))))
+    (secure-hash 'sha256
+                 (concat (funcall pad #x5c)
+                         (secure-hash 'sha256 (concat (funcall pad #x36) message)
+                                      nil nil t)))))
+
+(defun ement-e2ee--admin-token ()
+  "Return the admin token the proxy wrote to `ement-e2ee--token-file', or nil."
+  (when (and ement-e2ee--token-file (file-readable-p ement-e2ee--token-file))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert-file-contents-literally ement-e2ee--token-file)
+      (string-trim (buffer-string)))))
+
+(defun ement-e2ee--proof-valid-p (url nonce proof)
+  "Whether PROOF is what the proxy at URL owes for NONCE.
+That is the HMAC-SHA256, under the admin token in
+`ement-e2ee--token-file', of the address it is reached at and
+NONCE: what the proxy using this config's store directory, and
+listening at URL itself, can compute and nothing else can."
+  (let ((token (ement-e2ee--admin-token))
+        (address (string-remove-suffix "/" (string-remove-prefix "http://" url))))
+    (and (stringp proof) token (not (string-empty-p token))
+         (string= proof (ement-e2ee--hmac-sha256
+                         token (encode-coding-string
+                                (format "ement-e2ee version %s %s" address nonce)
+                                'utf-8))))))
 
 (defun ement-e2ee--probe (url &optional timeout)
   "Ask what listens at URL, waiting at most TIMEOUT seconds (default 2).
-Return (proxy . ALIST) for an ement-e2ee proxy, ALIST being its
-answer on the version route; `nothing' when nothing answers; or
-\(other . DESCRIPTION) for anything else.
+Return (proxy . ALIST) for the ement-e2ee proxy of this config,
+ALIST being its answer on the version route; `nothing' when
+nothing answers; or \(other . DESCRIPTION) for anything else.
+
+The proxy of this config is one that proves it can read the token
+file in the config's store directory, which only its owner can:
+anything else on the port, an ement-e2ee of another user or
+config included, is something else.  It would see ement's
+password and access tokens.
 
 Nothing answers when the connection is refused, or when it times
 out: with WSL2's mirrored networking, connecting to a loopback
 port nobody listens on hangs instead of failing.  Something that
 accepts connections and never answers counts as nothing too; a
 proxy started on its port then fails, and says why."
-  (let ((timeout (or timeout 2)))
+  (let ((timeout (or timeout 2))
+        (nonce (ement-e2ee--nonce)))
     (condition-case err
-        (let* ((response (plz 'get (concat url "/_ement/version")
+        (let* ((response (plz 'get (concat url "/_ement/version?nonce=" nonce)
                            :as 'response :then 'sync
                            ;; Loopback: a listener accepts at once.
                            :connect-timeout (min timeout 0.5) :timeout timeout))
                (body (ement-e2ee--json (plz-response-body response))))
-          (if (equal (alist-get 'name body) "ement-e2ee")
-              (cons 'proxy body)
-            (cons 'other (format "it answers HTTP %s" (plz-response-status response)))))
+          (cond ((not (equal (alist-get 'name body) "ement-e2ee"))
+                 (cons 'other (format "it answers HTTP %s" (plz-response-status response))))
+                ((ement-e2ee--proof-valid-p url nonce (alist-get 'proof body))
+                 (cons 'proxy body))
+                (t
+                 (cons 'other
+                       (format "an ement-e2ee %s (pid %s) that cannot show it is yours: \
+an older one, one started with another config or by another user, or an \
+impostor; stop it" (alist-get 'version body) (alist-get 'pid body))))))
       (plz-error
        (let* ((data (nth 2 err))
               (data (and (plz-error-p data) data))
@@ -861,7 +935,8 @@ else start one."
     (unless (alist-get 'homeserver info)
       (user-error "Ement-e2ee: %s names no homeserver; M-x ement-e2ee-setup writes one"
                   (alist-get 'config_file info)))
-    (setq ement-e2ee--url url)
+    (setq ement-e2ee--url url
+          ement-e2ee--token-file (alist-get 'admin_token_file info))
     ;; A restart about to happen in the background happens here instead.
     (when (timerp ement-e2ee--restart-timer)
       (cancel-timer ement-e2ee--restart-timer)

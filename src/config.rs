@@ -64,16 +64,46 @@ pub fn expand_tilde(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Normalize a homeserver base URL: no path, no trailing slash.
+/// Normalize a homeserver base URL: no path, no trailing slash. It must be
+/// https: passwords and access tokens go there. Only a homeserver on this
+/// machine may be spoken to in the clear.
 pub fn parse_homeserver(homeserver: &str) -> anyhow::Result<reqwest::Url> {
     let mut url: reqwest::Url = homeserver
         .parse()
         .context("homeserver is not a valid URL")?;
+    match url.scheme() {
+        "https" => {}
+        "http" if is_loopback_host(&url) => {}
+        "http" => anyhow::bail!(
+            "homeserver URL must be https, not http: passwords and access tokens would \
+             cross the network in the clear ({url}); http is accepted for a homeserver on \
+             this machine only"
+        ),
+        scheme => anyhow::bail!("homeserver URL must be https, not {scheme}: {url}"),
+    }
     if url.path() != "/" && !url.path().is_empty() {
         anyhow::bail!("homeserver URL must not have a path: {url}");
     }
     url.set_path("");
     Ok(url)
+}
+
+/// Does `url` name this machine: a loopback address, or localhost?
+pub fn is_loopback_host(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(is_loopback_name)
+}
+
+/// Is `host` (an IP address, IPv6 in brackets or not, or a domain name)
+/// this machine? Names under `localhost` are, per RFC 6761.
+pub fn is_loopback_name(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => {
+            let name = host.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
+    }
 }
 
 /// Run `store_passphrase_command` and take its output as the passphrase.
@@ -141,6 +171,32 @@ impl Config {
     }
 }
 
+/// A warning if the config file holds a secret that other users may read.
+pub fn exposed_secrets_warning(args: &ServeArgs, config: &Config) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if config.admin_token.is_none() && config.store_passphrase.is_none() {
+            return None;
+        }
+        let path = args.config.clone().or_else(default_config_path)?;
+        let mode = std::fs::metadata(&path).ok()?.permissions().mode();
+        (mode & 0o077 != 0).then(|| {
+            format!(
+                "{} holds a secret (admin_token or store_passphrase) but other users may read \
+                 it (mode {:o}); chmod 600 it",
+                path.display(),
+                mode & 0o777
+            )
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (args, config);
+        None
+    }
+}
+
 /// What `ctl` needs to reach a running proxy: where it listens and how to
 /// authenticate to its admin API. Read from the same config file as `serve`,
 /// without touching the settings only the proxy itself needs.
@@ -151,6 +207,8 @@ pub struct AdminEndpoint {
 }
 
 impl AdminEndpoint {
+    /// The token is the config's `admin_token`, or else the one the proxy
+    /// wrote into the config's store directory.
     pub fn load(config: Option<&Path>, proxy: Option<&str>) -> anyhow::Result<Self> {
         let file = FileConfig::read(config)?;
         let url = match proxy {
@@ -160,10 +218,14 @@ impl AdminEndpoint {
                 connect_addr(file.listen.unwrap_or(DEFAULT_LISTEN))
             ),
         };
-        Ok(Self {
-            url,
-            admin_token: file.admin_token,
-        })
+        let admin_token = match file.admin_token {
+            Some(token) => Some(token),
+            None => {
+                let store_dir = resolve_store_dir(None, file.store_dir)?;
+                crate::secret::read_token_file(&store_dir)?
+            }
+        };
+        Ok(Self { url, admin_token })
     }
 
     /// The listen address a config file sets (or the default).
@@ -187,6 +249,9 @@ pub struct Info {
     pub url: String,
     pub homeserver: Option<String>,
     pub store_dir: PathBuf,
+    /// Where the proxy writes its admin token: Emacs checks with it that
+    /// the proxy it finds on the port is this one.
+    pub admin_token_file: PathBuf,
 }
 
 impl Info {
@@ -201,6 +266,7 @@ impl Info {
             FileConfig::default()
         };
         let listen = file.listen.unwrap_or(DEFAULT_LISTEN);
+        let store_dir = resolve_store_dir(None, file.store_dir)?;
         Ok(Self {
             version: env!("CARGO_PKG_VERSION"),
             config_file,
@@ -208,7 +274,8 @@ impl Info {
             listen,
             url: format!("http://{}", connect_addr(listen)),
             homeserver: file.homeserver,
-            store_dir: resolve_store_dir(None, file.store_dir)?,
+            admin_token_file: crate::secret::token_file(&store_dir),
+            store_dir,
         })
     }
 }
@@ -316,6 +383,35 @@ mod tests {
     }
 
     #[test]
+    fn homeserver_must_be_https_unless_it_is_local() {
+        for ok in [
+            "https://matrix.example.org",
+            "https://192.168.1.5:8448",
+            "http://127.0.0.1:8008",
+            "http://127.1.2.3",
+            "http://[::1]:8008",
+            "http://localhost:8008",
+            "http://LocalHost.",
+            "http://matrix.localhost",
+        ] {
+            parse_homeserver(ok).unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+        }
+        for bad in [
+            "http://matrix.example.org",
+            "http://192.168.1.5:8008",
+            "http://[fe80::1]:8008",
+            "http://127.0.0.1.example.org",
+            "http://localhost.example.org",
+            "ftp://matrix.example.org",
+            "file:///srv/matrix",
+        ] {
+            assert!(parse_homeserver(bad).is_err(), "{bad}");
+        }
+        let error = load_error(r#"homeserver = "http://matrix.example.org""#);
+        assert!(error.contains("must be https"), "{error}");
+    }
+
+    #[test]
     fn mistakes_in_the_file_are_reported() {
         // Typos must not be silently ignored (think `admin_tokn`).
         let error = load_error(
@@ -414,6 +510,28 @@ mod tests {
     }
 
     #[test]
+    fn ctl_takes_the_token_the_proxy_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        let config = format!(
+            "homeserver = \"https://matrix.example.org\"\nstore_dir = \"{}\"\n",
+            store.display()
+        );
+        let args = args_for(&dir, &config);
+        let path = args.config.as_deref();
+        // No proxy has run: no token.
+        assert_eq!(AdminEndpoint::load(path, None).unwrap().admin_token, None);
+        crate::secret::write_token_file(&store, "drawn").unwrap();
+        let endpoint = AdminEndpoint::load(path, Some("http://127.0.0.1:1")).unwrap();
+        assert_eq!(endpoint.admin_token.as_deref(), Some("drawn"));
+
+        // A configured token is the one, whatever the file says.
+        let args = args_for(&dir, &format!("{config}admin_token = \"s3cret\"\n"));
+        let endpoint = AdminEndpoint::load(args.config.as_deref(), None).unwrap();
+        assert_eq!(endpoint.admin_token.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
     fn wildcard_listen_is_reached_via_loopback() {
         assert_eq!(
             connect_addr("0.0.0.0:8009".parse().unwrap()),
@@ -457,6 +575,10 @@ mod tests {
             Some("https://matrix.example.org")
         );
         assert_eq!(info.store_dir, dirs::home_dir().unwrap().join("stores"));
+        assert_eq!(
+            info.admin_token_file,
+            dirs::home_dir().unwrap().join("stores/.admin-token")
+        );
     }
 
     #[test]

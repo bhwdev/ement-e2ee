@@ -5,11 +5,10 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use anyhow::Context as _;
 use clap::Subcommand;
 use serde_json::{Value, json};
 
-use crate::admin::ctl::Client;
+use crate::admin::ctl::{Client, terminal_safe};
 use crate::crypto::machine::enc;
 
 #[derive(clap::Args)]
@@ -82,10 +81,10 @@ pub async fn run(client: &Client, args: DebugArgs) -> anyhow::Result<()> {
         if args.json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(answer).unwrap_or_default()
+                terminal_safe(&serde_json::to_string_pretty(answer).unwrap_or_default())
             );
         } else {
-            print!("{}", render(answer));
+            print!("{}", terminal_safe(&render(answer)));
         }
     };
 
@@ -148,14 +147,13 @@ pub async fn run(client: &Client, args: DebugArgs) -> anyhow::Result<()> {
             let text = serde_json::to_string_pretty(&report)?;
             match output {
                 Some(path) => {
-                    std::fs::write(path, text)
-                        .with_context(|| format!("failed to write {}", path.display()))?;
+                    crate::secret::write_private(path, text.as_bytes())?;
                     println!(
                         "Wrote {} (contains Matrix IDs and public keys; no tokens or private keys).",
                         path.display()
                     );
                 }
-                None => println!("{text}"),
+                None => println!("{}", terminal_safe(&text)),
             }
         }
     }

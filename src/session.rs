@@ -263,9 +263,11 @@ fn spawn_periodic_pump(ctx: &Arc<AccountContext>) {
     });
 }
 
-/// Directory-safe encoding of an ID for use in store paths.
+/// Directory-safe encoding of an ID for use in store paths: one plain path
+/// component, never `.` or `..` or nothing at all.
 pub fn sanitize_for_path(id: &str) -> String {
-    id.chars()
+    let name: String = id
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | ':' | '=' | '+') {
                 c
@@ -273,7 +275,13 @@ pub fn sanitize_for_path(id: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if name.chars().all(|c| c == '.') {
+        // "", "." and ".." name the directory itself or its parent.
+        "_".repeat(name.len().max(1))
+    } else {
+        name
+    }
 }
 
 #[cfg(test)]
@@ -299,5 +307,11 @@ mod tests {
         assert_eq!(sanitize_for_path("dev ice\0\n"), "dev_ice__");
         assert_eq!(sanitize_for_path("gerät"), "ger_t");
         assert!(!sanitize_for_path("@a/../../b:hs").contains('/'));
+        // Whole components that would not be a directory of their own.
+        assert_eq!(sanitize_for_path(".."), "__");
+        assert_eq!(sanitize_for_path("."), "_");
+        assert_eq!(sanitize_for_path(""), "_");
+        assert_eq!(sanitize_for_path("..."), "___");
+        assert_eq!(sanitize_for_path("..a"), "..a");
     }
 }

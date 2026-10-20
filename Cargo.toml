@@ -35,6 +35,12 @@ futures-util = "0.3"
 toml = "1"
 bytes = "1"
 percent-encoding = "2"
+getrandom = "0.4"
+hmac = "0.13"
+sha2 = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 socket2 = "0.6"

@@ -32,6 +32,8 @@ const VERSION_FILE: &str = ".version";
 #[derive(Debug)]
 pub struct StoreGuard {
     _lock: File,
+    /// The directory's mode, if other users had access to it before.
+    pub tightened_from: Option<u32>,
 }
 
 /// Claim `store_dir` for this process and this binary's version.
@@ -41,6 +43,7 @@ pub fn claim(store_dir: &Path) -> anyhow::Result<StoreGuard> {
 
 fn claim_as(store_dir: &Path, version: &str) -> anyhow::Result<StoreGuard> {
     create_private_dir(store_dir)?;
+    let tightened_from = make_private(store_dir)?;
     // Lock first: the marker is only read and raised under the lock.
     let lock = lock(store_dir)?;
     raise_marker(store_dir, version)?;
@@ -50,7 +53,36 @@ fn claim_as(store_dir: &Path, version: &str) -> anyhow::Result<StoreGuard> {
             check_crypto_store_schema(&device_dir)?;
         }
     }
-    Ok(StoreGuard { _lock: lock })
+    Ok(StoreGuard {
+        _lock: lock,
+        tightened_from,
+    })
+}
+
+/// Close the store directory to everyone but its owner, if it is not yet:
+/// it holds private keys, and the crypto store is unencrypted without a
+/// store passphrase. Returns the mode it had then.
+fn make_private(dir: &Path) -> anyhow::Result<Option<u32>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(dir)
+            .with_context(|| format!("failed to inspect {}", dir.display()))?
+            .permissions()
+            .mode()
+            & 0o7777;
+        if mode & 0o077 == 0 {
+            return Ok(None);
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to make {} private (chmod 700)", dir.display()))?;
+        Ok(Some(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(None)
+    }
 }
 
 fn subdirs(dir: &Path) -> Vec<std::path::PathBuf> {
@@ -350,6 +382,23 @@ mod tests {
         // Not ours to judge: matrix-sdk-sqlite reports these.
         std::fs::write(dir.path().join(STORE_FILE), b"").unwrap();
         check_crypto_store_schema(dir.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_open_store_directory_is_closed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let guard = claim(&store).unwrap();
+        assert_eq!(guard.tightened_from, Some(0o755));
+        let mode = std::fs::metadata(&store).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        drop(guard);
+        // Already private: nothing to say.
+        assert_eq!(claim(&store).unwrap().tightened_from, None);
     }
 
     #[cfg(unix)]

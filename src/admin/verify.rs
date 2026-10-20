@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use serde_json::{Value, json};
 
-use crate::admin::ctl::Client;
+use crate::admin::ctl::{Client, terminal_safe};
 
 /// How long the side that did not send the request waits for the other to
 /// pick emoji verification before starting it itself.
@@ -203,11 +203,11 @@ pub struct TerminalUi;
 
 impl VerifyUi for TerminalUi {
     fn status(&mut self, message: &str) {
-        println!("{message}");
+        println!("{}", terminal_safe(message));
     }
 
     fn confirm_match(&mut self, sas: &Value) -> anyhow::Result<bool> {
-        println!("\n{}\n", render_sas(sas)?);
+        println!("\n{}\n", terminal_safe(&render_sas(sas)?));
         print!("Does the other device show exactly the same? [y/N] ");
         std::io::stdout().flush()?;
         let mut answer = String::new();

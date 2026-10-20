@@ -29,33 +29,55 @@ fn is_public(method: &axum::http::Method, sub: &str) -> bool {
     method == axum::http::Method::GET && sub.trim_end_matches('/') == "version"
 }
 
-fn version() -> Response {
-    Json(serde_json::json!({
+/// Name, version and pid; asked with a `nonce`, also the proof that this
+/// proxy can read its token file (see `secret::version_proof`).
+fn version(state: &AppState, query: &std::collections::HashMap<String, String>) -> Response {
+    let mut answer = serde_json::json!({
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
         "pid": std::process::id(),
-    }))
-    .into_response()
+    });
+    if let Some(nonce) = query.get("nonce") {
+        if !crate::secret::valid_nonce(nonce) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "nonce must be 16 to 128 hex digits",
+            );
+        }
+        answer["proof"] =
+            crate::secret::version_proof(&state.admin_token, state.reached_at, nonce).into();
+    }
+    Json(answer).into_response()
 }
 
 /// Handle a request under /_ement/.
 pub async fn handle(state: &AppState, sub: &str, req: Request) -> Result<Response, ProxyError> {
-    if is_public(req.method(), sub) {
-        return Ok(version());
+    // Programs talk to the admin API; browsers have no business there, and
+    // the token aside, a web page could make them send requests (CSRF).
+    if req.headers().contains_key(header::ORIGIN) {
+        return Ok(json_error(
+            StatusCode::FORBIDDEN,
+            "the admin API does not answer browsers",
+        ));
     }
-    if let Some(expected) = &state.config.admin_token {
-        let ok = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .is_some_and(|t| t == expected);
-        if !ok {
-            return Ok(json_error(
-                StatusCode::UNAUTHORIZED,
-                "missing or invalid admin token",
-            ));
-        }
+    if is_public(req.method(), sub) {
+        return Ok(version(state, &parse_query(req.uri().query())));
+    }
+    let authorized = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|t| crate::secret::same_secret(t.as_bytes(), state.admin_token.as_bytes()));
+    if !authorized {
+        return Ok(json_error(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "missing or invalid admin token (the config's admin_token, or else {} as the \
+                 proxy wrote it at start-up)",
+                crate::secret::token_file(&state.config.store_dir).display()
+            ),
+        ));
     }
 
     let method = req.method().clone();

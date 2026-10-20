@@ -8,7 +8,7 @@ use crate::crypto::device::{DeviceConflict, DeviceUnchecked};
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
     #[error("upstream request failed: {0}")]
-    Upstream(#[from] reqwest::Error),
+    Upstream(reqwest::Error),
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
     #[error("{0}")]
@@ -17,6 +17,18 @@ pub enum ProxyError {
     DeviceConflict(#[from] DeviceConflict),
     #[error("{0}")]
     DeviceUnchecked(#[from] DeviceUnchecked),
+}
+
+impl From<reqwest::Error> for ProxyError {
+    /// The error names the URL, which may carry the client's query string,
+    /// a legacy `access_token=` included; it goes into the log and back to
+    /// the client. Keep the path only.
+    fn from(mut error: reqwest::Error) -> Self {
+        if let Some(url) = error.url_mut() {
+            url.set_query(None);
+        }
+        ProxyError::Upstream(error)
+    }
 }
 
 impl IntoResponse for ProxyError {
@@ -35,5 +47,28 @@ impl IntoResponse for ProxyError {
             "error": format!("ement-e2ee: {self}"),
         });
         (status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn upstream_errors_do_not_repeat_the_query() {
+        // Nothing listens on port 1 (where WSL2 may leave the connection
+        // hanging rather than refuse it: either way, an error).
+        let error = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1/_matrix/client/v3/sync?access_token=syt_secret&since=s1")
+            .send()
+            .await
+            .unwrap_err();
+        let error = ProxyError::from(error);
+        let text = format!("{error} {error:?}");
+        assert!(!text.contains("syt_secret"), "{text}");
+        assert!(text.contains("/_matrix/client/v3/sync"), "{text}");
     }
 }

@@ -53,6 +53,12 @@ impl MediaKeyCache {
         })
     }
 
+    /// Remember the key of `mxc`. The content behind an mxc URI never
+    /// changes, and neither does its key: the first one seen stays. Any
+    /// member of any room may name any mxc URI in an event of their own,
+    /// with a key of their choosing; replacing the key would let them break
+    /// media others sent (and an upload of ours, before it is sent).
+    /// Seeing the same key again updates the metadata.
     pub fn insert(
         &self,
         mxc: &str,
@@ -60,12 +66,39 @@ impl MediaKeyCache {
         mimetype: Option<&str>,
         filename: Option<&str>,
     ) -> anyhow::Result<()> {
-        let key_json = serde_json::to_string(info)?;
-        self.conn.lock().unwrap().execute(
-            "INSERT OR REPLACE INTO media_keys (mxc, key_json, mimetype, filename)
-             VALUES (?1, ?2, ?3, ?4)",
+        let ours = serde_json::to_value(info)?;
+        let key_json = ours.to_string();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO media_keys (mxc, key_json, mimetype, filename)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (mxc) DO NOTHING",
             rusqlite::params![mxc, key_json, mimetype, filename],
         )?;
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT key_json FROM media_keys WHERE mxc = ?1",
+                [mxc],
+                |row| row.get(0),
+            )
+            .ok();
+        let same_key = stored
+            .and_then(|stored| serde_json::from_str::<Value>(&stored).ok())
+            .is_some_and(|stored| {
+                ["/key/k", "/iv", "/hashes/sha256"]
+                    .iter()
+                    .all(|field| stored.pointer(field) == ours.pointer(field))
+            });
+        if same_key {
+            conn.execute(
+                "UPDATE media_keys SET mimetype = COALESCE(?2, mimetype),
+                                       filename = COALESCE(?3, filename)
+                 WHERE mxc = ?1",
+                rusqlite::params![mxc, mimetype, filename],
+            )?;
+        } else {
+            tracing::warn!(%mxc, "ignored another key for media whose key is known");
+        }
         Ok(())
     }
 
@@ -216,18 +249,78 @@ pub async fn handle_download(
         .and_then(|m| header::HeaderValue::from_str(m).ok())
         .unwrap_or(header::HeaderValue::from_static("application/octet-stream"));
 
-    let mut builder = Response::builder()
+    let disposition = content_disposition(
+        content_type.to_str().unwrap_or_default(),
+        entry.filename.as_deref(),
+    );
+    Response::builder()
         .status(200)
-        .header(header::CONTENT_TYPE, content_type);
-    if let Some(filename) = &entry.filename
-        && let Ok(disposition) =
-            header::HeaderValue::from_str(&format!("inline; filename=\"{filename}\""))
-    {
-        builder = builder.header(header::CONTENT_DISPOSITION, disposition);
-    }
-    builder
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_DISPOSITION, disposition)
         .body(Body::from(decrypted))
         .map_err(|e| ProxyError::Internal(e.into()))
+}
+
+/// The types a browser may show in place, as Synapse has them (its
+/// `INLINE_CONTENT_TYPES`): nothing that runs code. Whatever else a sender
+/// labelled their attachment is offered as a download.
+const INLINE_CONTENT_TYPES: &[&str] = &[
+    "text/css",
+    "text/plain",
+    "text/csv",
+    "application/json",
+    "application/ld+json",
+    "image/jpeg",
+    "image/gif",
+    "image/png",
+    "image/apng",
+    "image/webp",
+    "image/avif",
+    "video/mp4",
+    "video/webm",
+    "video/ogg",
+    "video/quicktime",
+    "audio/mp4",
+    "audio/webm",
+    "audio/aac",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wave",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/x-pn-wav",
+    "audio/flac",
+    "audio/x-flac",
+];
+
+/// Content-Disposition for a decrypted attachment: inline only for
+/// harmless types, and the sender's file name, if any, made safe to quote.
+fn content_disposition(content_type: &str, filename: Option<&str>) -> header::HeaderValue {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let kind = if INLINE_CONTENT_TYPES.contains(&essence.as_str()) {
+        "inline"
+    } else {
+        "attachment"
+    };
+    let filename: Option<String> = filename.map(|name| {
+        name.chars()
+            .map(|c| match c {
+                '"' | '\\' => '_',
+                c if c.is_ascii_graphic() || c == ' ' => c,
+                _ => '_',
+            })
+            .collect()
+    });
+    let value = match filename {
+        Some(name) if !name.trim().is_empty() => format!("{kind}; filename=\"{name}\""),
+        _ => kind.to_owned(),
+    };
+    header::HeaderValue::from_str(&value).unwrap_or(header::HeaderValue::from_static("attachment"))
 }
 
 /// Outgoing content rewrite for encrypted rooms: turn `url` into an
@@ -510,6 +603,74 @@ mod tests {
         assert_eq!(entry.mimetype.as_deref(), Some("text/plain"));
         assert_eq!(entry.filename.as_deref(), Some("a.txt"));
         assert_eq!(decrypt_attachment(&encrypted, entry.info).unwrap(), b"data");
+    }
+
+    #[test]
+    fn a_known_media_key_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MediaKeyCache::open(&dir.path().join("media.sqlite")).unwrap();
+        let (encrypted, info) = encrypt_attachment(b"alice's photo").unwrap();
+        let info_json = serde_json::to_string(&info).unwrap();
+        cache
+            .insert("mxc://example.org/abc", &info, Some("image/png"), None)
+            .unwrap();
+        // Mallory names the same mxc with a key of her own.
+        let (_, mallorys) = encrypt_attachment(b"something else").unwrap();
+        cache
+            .insert(
+                "mxc://example.org/abc",
+                &mallorys,
+                Some("text/html"),
+                Some("x.html"),
+            )
+            .unwrap();
+        let entry = cache.get("mxc://example.org/abc").unwrap();
+        assert_eq!(entry.mimetype.as_deref(), Some("image/png"));
+        assert_eq!(entry.filename, None);
+        assert_eq!(
+            decrypt_attachment(&encrypted, entry.info).unwrap(),
+            b"alice's photo"
+        );
+        // The same key again (a forward, say) may fill in a file name.
+        let info: MediaEncryptionInfo = serde_json::from_str(&info_json).unwrap();
+        cache
+            .insert("mxc://example.org/abc", &info, None, Some("photo.png"))
+            .unwrap();
+        let entry = cache.get("mxc://example.org/abc").unwrap();
+        assert_eq!(entry.mimetype.as_deref(), Some("image/png"));
+        assert_eq!(entry.filename.as_deref(), Some("photo.png"));
+    }
+
+    #[test]
+    fn only_harmless_types_are_shown_in_place() {
+        let value = |content_type, filename| {
+            content_disposition(content_type, filename)
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            value("image/png", Some("cat.png")),
+            "inline; filename=\"cat.png\""
+        );
+        assert_eq!(value("Text/Plain; charset=utf-8", None), "inline");
+        for active in [
+            "text/html",
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "application/pdf",
+        ] {
+            assert!(value(active, None).starts_with("attachment"), "{active}");
+        }
+        // A file name cannot break out of its quotes or the header.
+        assert_eq!(
+            value("text/html", Some("a\"; filename=evil.html\r\nX: y")),
+            "attachment; filename=\"a_; filename=evil.html__X: y\""
+        );
+        assert_eq!(
+            value("image/png", Some("ü.png")),
+            "inline; filename=\"_.png\""
+        );
     }
 
     #[test]

@@ -222,10 +222,17 @@ up in Element → Settings → Sessions.
 - ~store_passphrase_command~ — a shell command that prints the passphrase
   encrypting the crypto store (~pass show …~, ~secret-tool lookup …~), so it
   need not sit in the file. ~store_passphrase~ holds it directly instead.
-- ~admin_token~ — required on the ~/_ement~ admin API when set. ~ctl~ reads
-  it, and the listen address, from the same config file (~ctl --config FILE~
-  for a non-default one).
+- ~admin_token~ — the token the ~/_ement~ admin API requires. Without it,
+  the proxy draws a new one each time it starts and writes it to
+  =.admin-token= in the store directory. ~ctl~ finds it either way, and the
+  listen address, through the same config file (~ctl --config FILE~ for a
+  non-default one). By hand: ~curl -H "Authorization: Bearer $(cat
+  ~/.local/share/ement-e2ee/.admin-token)" http://127.0.0.1:8009/_ement/status~.
 - ~store_dir~ — a leading =~= is expanded.
+
+~homeserver~ has to be https; plain http is accepted only for a homeserver on
+this machine (127.0.0.1, ::1, localhost), and redirects from https to http
+are not followed.
 
 ~ement-e2ee info [--json]~ shows what a proxy started with the config would
 use: the listen address and URL, the homeserver, the store directory.
@@ -250,8 +257,14 @@ ement-e2ee ctl debug check|session|devices|room|event|logs|log-level|report
 The CLI talks to ~/_ement/*~ on the proxy's listen address, which it takes
 from the config file (~--proxy URL~ overrides it). The ~verify~ subcommands
 perform single steps of a flow, for scripting. ~GET /_ement/version~ (name,
-version and process ID) is the one route open without ~admin_token~: it is
-how Emacs tells the proxy from anything else on the port.
+version and process ID) is the one route open without the admin token: it is
+how Emacs tells the proxy from anything else on the port. Asked with
+~?nonce=HEX~, it adds a ~proof~: the HMAC-SHA256, keyed with the admin token,
+of =ement-e2ee version ADDRESS NONCE=. Emacs uses a proxy only if it can
+check that proof against the token file of its config's store directory,
+which only its owner can read. A process of another user, or a Windows one
+under WSL2, that takes the port first cannot pass it, and so never gets
+ement's password and access tokens.
 
 * Debugging
 
@@ -302,7 +315,20 @@ Matrix IDs and public keys, but no tokens, passphrases or private keys.
   the room, like other clients' defaults.
 - *WSL2*: keep the clock NTP-synced (crypto is timestamp-sensitive), bind
   only on 127.0.0.1 (default), and note that localhost is shared with Windows
-  processes.
+  processes: one reason the admin API always needs its token.
+- *Browsers*: the proxy answers only requests addressed to an IP address or
+  to localhost, so a web page cannot reach it under a name of its own (DNS
+  rebinding). The admin API turns away any request that carries an =Origin=,
+  and every response tells browsers not to run scripts in it or embed it
+  elsewhere (=Content-Security-Policy: sandbox=, =nosniff=,
+  =Cross-Origin-Resource-Policy=). A decrypted attachment is offered as a
+  download unless its type is one a browser shows harmlessly.
+- *Forged events*: a decrypted event keeps only its type and content; the
+  relation (edit, reply, reaction) is the one in the clear, as the homeserver
+  and Element see it. Encrypted events of types only the homeserver sends
+  (state, redactions, receipts, typing) are shown as a notice saying so:
+  otherwise any member of a room could rename it for ement, change who is
+  in it and what they are called, or hide others' messages.
 
 * Devices
 :PROPERTIES:
@@ -345,8 +371,10 @@ store directory, connect again.
 - =login.json= — the device ID ement asks for at login, where the proxy chose
   another: how the next login finds this device again.
 
-The store directory itself holds =.lock=, which keeps a second proxy (on
-another port, say) from using the same stores while one runs, and
+The store directory, which the proxy keeps accessible to its owner only
+(mode 700, and everything it creates in it 600), holds =.admin-token=, the
+admin token of the proxy using it; =.lock=, which keeps a second proxy (on
+another port, say) from using the same stores while one runs; and
 =.version=, the newest ement-e2ee that has used it: an older one refuses to
 start there, since it cannot read what a newer one may have migrated. It
 says which version to install; delete =.version= only if you are certain.

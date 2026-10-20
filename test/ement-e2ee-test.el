@@ -46,6 +46,7 @@
   `(let ((ement-e2ee--process nil)
          (ement-e2ee--adopted nil)
          (ement-e2ee--url nil)
+         (ement-e2ee--token-file nil)
          (ement-e2ee--stopping nil)
          (ement-e2ee--backoff 0)
          (ement-e2ee--quick-deaths 0)
@@ -422,6 +423,66 @@ whose text is SUMS if given."
           (result (ert-fail (list "not classified as something else" result))))
       (delete-process server))))
 
+(ert-deftest ement-e2ee-test-hmac-sha256 ()
+  ;; RFC 4231, test cases 1, 2 and 6 (a key longer than a block).
+  (should (equal (ement-e2ee--hmac-sha256 (make-string 20 #x0b) "Hi There")
+                 "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"))
+  (should (equal (ement-e2ee--hmac-sha256 "Jefe" "what do ya want for nothing?")
+                 "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"))
+  (should (equal (ement-e2ee--hmac-sha256
+                  (apply #'unibyte-string (make-list 131 #xaa))
+                  "Test Using Larger Than Block-Size Key - Hash Key First")
+                 "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")))
+
+(ert-deftest ement-e2ee-test-proof-matches-the-proxys ()
+  (ement-e2ee-test--with-temp-dir dir
+    (ement-e2ee-test--with-state
+      (let ((nonce "00112233445566778899aabbccddeeff")
+            ;; What src/secret.rs computes for these.
+            (proof "6db7c1973eaa390c029abe4a50f928415e37e6f1c1ac5f01576b651923aabc5e"))
+        (setq ement-e2ee--token-file (expand-file-name ".admin-token" dir))
+        ;; No token file: nothing can prove anything.
+        (should-not (ement-e2ee--proof-valid-p "http://127.0.0.1:8009" nonce proof))
+        (with-temp-file ement-e2ee--token-file
+          (insert "s3cret\n"))
+        (should (ement-e2ee--proof-valid-p "http://127.0.0.1:8009" nonce proof))
+        ;; Another address (a proxy relayed from elsewhere), another nonce.
+        (should-not (ement-e2ee--proof-valid-p "http://127.0.0.1:8010" nonce proof))
+        (should-not (ement-e2ee--proof-valid-p
+                     "http://127.0.0.1:8009" "00112233445566778899aabbccddeef0" proof))
+        (should-not (ement-e2ee--proof-valid-p "http://127.0.0.1:8009" nonce nil))))))
+
+(ert-deftest ement-e2ee-test-nonces-differ ()
+  (let ((nonces (cl-loop repeat 20 collect (ement-e2ee--nonce))))
+    (should (cl-every (lambda (nonce) (string-match-p (rx bos (= 32 hex) eos) nonce)) nonces))
+    (should (= (length (delete-dups (copy-sequence nonces))) 20))))
+
+(ert-deftest ement-e2ee-test-probe-unmasks-an-impostor ()
+  ;; Something that says it is ement-e2ee, and cannot prove it.
+  (ement-e2ee-test--with-temp-dir dir
+    (ement-e2ee-test--with-state
+      (setq ement-e2ee--token-file (expand-file-name ".admin-token" dir))
+      (with-temp-file ement-e2ee--token-file
+        (insert "s3cret\n"))
+      (let* ((answer "{\"name\":\"ement-e2ee\",\"version\":\"99.0.0\",\"pid\":1,\"proof\":\"00\"}")
+             (server (make-network-process
+                      :name "ement-e2ee-test-server" :server t :host "127.0.0.1" :service t
+                      :family 'ipv4 :noquery t
+                      :filter (lambda (connection _)
+                                (process-send-string
+                                 connection
+                                 (format "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+Content-Length: %d\r\nConnection: close\r\n\r\n%s"
+                                         (length answer) answer))
+                                (process-send-eof connection))))
+             (url (format "http://127.0.0.1:%d" (process-contact server :service))))
+        (unwind-protect
+            (pcase (ement-e2ee--probe url)
+              (`(other . ,what) (should (string-match-p "cannot show it is yours" what))
+               (should (string-match-p "pid 1" what)))
+              (result (ert-fail (list "an impostor was taken for the proxy" result))))
+          (delete-process server))))))
+
 ;;;; ement integration
 
 (ert-deftest ement-e2ee-test-advice-routes-a-new-login ()
@@ -551,6 +612,17 @@ more config."
       (should-not ement-e2ee--process)
       (should-not (timerp ement-e2ee--restart-timer))
       (should (eq (ement-e2ee--probe url) 'nothing)))))
+
+(ert-deftest ement-e2ee-test-proxy-of-another-store-is-not-ours ()
+  (ement-e2ee-test--with-proxy config port nil
+    (ignore config port)
+    (let ((url (ement-e2ee--ensure)))
+      (should (eq (car (ement-e2ee--probe url)) 'proxy))
+      ;; As if this config's store were another: that proxy is not ours.
+      (let ((ement-e2ee--token-file (make-temp-file "ement-e2ee-test-token" nil nil "x\n")))
+        (unwind-protect
+            (should (eq (car (ement-e2ee--probe url)) 'other))
+          (delete-file ement-e2ee--token-file))))))
 
 (ert-deftest ement-e2ee-test-proxy-older-than-needed-is-replaced ()
   ;; This package was upgraded, and reloaded, while its proxy ran.

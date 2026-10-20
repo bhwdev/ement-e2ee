@@ -945,8 +945,11 @@ async fn passthrough_relays_everything_else() {
 #[tokio::test]
 async fn admin_api_requires_token_when_configured() {
     let h = Harness::builder().admin_token("s3cret").start().await;
+    assert_eq!(&*h.state.admin_token, "s3cret");
 
-    let (status, body) = h.request(Method::GET, "/_ement/status", None, None).await;
+    let (status, body) = h
+        .request_as(Method::GET, "/_ement/status", None, None)
+        .await;
     assert_eq!(status, 401);
     assert!(body["error"].as_str().unwrap().contains("admin token"));
     let (status, _) = h.get("wrong", "/_ement/status").await;
@@ -959,7 +962,12 @@ async fn admin_api_requires_token_when_configured() {
 
     // The guard covers the whole admin surface, not just status.
     let (status, _) = h
-        .post(None, "/_ement/bootstrap", &json!({ "recovery_key": "x" }))
+        .request_as(
+            Method::POST,
+            "/_ement/bootstrap",
+            None,
+            Some(&json!({ "recovery_key": "x" })),
+        )
         .await;
     assert_eq!(status, 401);
     // Matrix traffic is unaffected by the admin token.
@@ -967,6 +975,185 @@ async fn admin_api_requires_token_when_configured() {
         .request(Method::GET, "/_matrix/client/versions", None, None)
         .await;
     assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn admin_api_requires_a_token_even_when_none_is_configured() {
+    let h = Harness::start().await;
+    // One was drawn for this run.
+    assert_eq!(h.state.admin_token.len(), 64);
+    for (method, path, body) in [
+        (Method::GET, "/_ement/status", None),
+        (
+            Method::POST,
+            "/_ement/keys/export",
+            Some(json!({ "passphrase": "mine now" })),
+        ),
+        (
+            Method::POST,
+            "/_ement/keys/import",
+            Some(json!({ "passphrase": "x", "data": "y" })),
+        ),
+        (Method::GET, "/_ement/debug/logs", None),
+    ] {
+        let (status, body) = h.request_as(method, path, None, body.as_ref()).await;
+        assert_eq!(status, 401, "{path}: {body}");
+        // Saying where the token is.
+        assert!(
+            body["error"].as_str().unwrap().contains(".admin-token"),
+            "{body}"
+        );
+    }
+    let (status, _) = h.get(&h.state.admin_token, "/_ement/status").await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn admin_api_turns_browsers_away() {
+    let h = Harness::start().await;
+    // A web page's request, token or not (a form post needs none to be
+    // sent, and a script could have learnt one).
+    for path in ["/_ement/status", "/_ement/version"] {
+        let response = h
+            .http
+            .get(format!("{}{path}", h.url))
+            .bearer_auth(&*h.state.admin_token)
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn requests_addressed_to_other_names_are_refused() {
+    let h = Harness::start().await;
+    // DNS rebinding: a web page at evil.example, which now resolves to
+    // 127.0.0.1, reaching the proxy as itself.
+    for path in [
+        "/_ement/status",
+        "/_matrix/client/versions",
+        "/_matrix/media/r0/download/example.org/abc",
+    ] {
+        let response = h
+            .http
+            .get(format!("{}{path}", h.url))
+            .bearer_auth(&*h.state.admin_token)
+            .header("host", "evil.example:8009")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403, "{path}");
+        let body: Value = response.json().await.unwrap();
+        assert!(body["error"].as_str().unwrap().contains("evil.example"));
+    }
+    // The address itself, or localhost, is fine.
+    for host in ["localhost", "127.0.0.1"] {
+        let response = h
+            .http
+            .get(format!("{}/_matrix/client/versions", h.url))
+            .header("host", host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{host}");
+    }
+}
+
+#[tokio::test]
+async fn responses_tell_browsers_to_keep_away() {
+    let h = Harness::start().await;
+    for path in [
+        "/_ement/version",
+        "/_matrix/client/versions",
+        "/_ement/nope",
+    ] {
+        let response = h.http.get(format!("{}{path}", h.url)).send().await.unwrap();
+        let headers = response.headers();
+        let csp = headers["content-security-policy"].to_str().unwrap();
+        assert!(csp.starts_with("sandbox;"), "{path}: {csp}");
+        assert!(csp.contains("script-src 'none'"), "{path}: {csp}");
+        assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
+        assert_eq!(
+            headers["cross-origin-resource-policy"], "same-origin",
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn version_route_proves_the_proxy_holds_the_token() {
+    let h = Harness::start().await;
+    let nonce = "00112233445566778899aabbccddeeff";
+    let (status, body) = h
+        .request_as(
+            Method::GET,
+            &format!("/_ement/version?nonce={nonce}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let expected = crate::secret::version_proof(&h.state.admin_token, h.state.reached_at, nonce);
+    assert_eq!(body["proof"], expected.as_str());
+    assert_eq!(h.url, format!("http://{}", h.state.reached_at));
+    // Without a nonce: no proof, as before.
+    let (_, body) = h
+        .request_as(Method::GET, "/_ement/version", None, None)
+        .await;
+    assert!(body.get("proof").is_none());
+    // Not hex, or too short to be unpredictable.
+    for bad in ["zz112233445566778899aabbccddeeff", "0011"] {
+        let (status, _) = h
+            .request_as(
+                Method::GET,
+                &format!("/_ement/version?nonce={bad}"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, 400, "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn encrypted_state_and_redactions_are_not_believed() {
+    let (h, room, alice, bob) = alice_and_bob(true).await;
+    let target = h.send_text(&bob, &room, "bob's message").await;
+    // Alice's client (a hostile one, behind the proxy here only for
+    // convenience) encrypts events only the homeserver may send.
+    h.send(
+        &alice,
+        &room,
+        "m.room.name",
+        "name1",
+        &json!({ "name": "Pwned" }),
+    )
+    .await;
+    h.send(
+        &alice,
+        &room,
+        "m.room.redaction",
+        "redact1",
+        &json!({ "redacts": target }),
+    )
+    .await;
+
+    let events = h.sync_timeline(&bob, &room).await;
+    assert_eq!(events.len(), 3);
+    assert_decrypted_text(&events[0], "bob's message");
+    for (event, event_type) in [
+        (&events[1], "m.room.name"),
+        (&events[2], "m.room.redaction"),
+    ] {
+        assert_eq!(event["type"], "m.room.message", "{event}");
+        assert_eq!(event["content"]["msgtype"], "m.notice", "{event}");
+        assert_eq!(event["sender"], ALICE);
+        assert_eq!(event["unsigned"]["ement_e2ee"]["ignored_type"], event_type);
+        assert!(!event.to_string().contains("Pwned"), "{event}");
+        assert!(event.get("redacts").is_none(), "{event}");
+    }
 }
 
 #[tokio::test]
@@ -2382,10 +2569,12 @@ async fn debug_logs_report_and_log_level() {
 #[tokio::test]
 async fn debug_api_honours_the_admin_token() {
     let h = Harness::builder().admin_token("s3cret").start().await;
-    let (status, _) = debug_get(&h, "check").await;
-    assert_eq!(status, 401);
-    let (status, _) = debug_get(&h, "report").await;
-    assert_eq!(status, 401);
+    for path in ["check", "report"] {
+        let (status, _) = h
+            .request_as(Method::GET, &format!("/_ement/debug/{path}"), None, None)
+            .await;
+        assert_eq!(status, 401, "{path}");
+    }
     let (status, _) = h.get("s3cret", "/_ement/debug/check").await;
     assert_eq!(status, 200);
     // `ctl` sends the token it found in the config.

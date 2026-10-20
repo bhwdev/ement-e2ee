@@ -10,12 +10,31 @@ pub struct Upstream {
     pub http: reqwest::Client,
 }
 
+/// Follow redirects, but never from https into the clear: a login's body
+/// (the password) is sent again to wherever a 307 or 308 points. A
+/// homeserver on this machine may redirect to itself over http.
+pub fn https_only_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else if attempt.url().scheme() == "https"
+            || (attempt.url().scheme() == "http" && crate::config::is_loopback_host(attempt.url()))
+        {
+            attempt.follow()
+        } else {
+            let refusal = format!("refusing to follow a redirect to {}", attempt.url());
+            attempt.error(refusal)
+        }
+    })
+}
+
 impl Upstream {
     pub fn new(base: Url) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             // No overall timeout: /sync long-polls for 30s and media may be large.
             // Individual JSON helpers set their own timeouts.
+            .redirect(https_only_redirects())
             .build()
             .context("failed to build upstream HTTP client")?;
         Ok(Self { base, http })
