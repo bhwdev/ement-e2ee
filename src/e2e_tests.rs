@@ -7,7 +7,7 @@ use axum::http::Method;
 use matrix_sdk_crypto::secret_storage::SecretStorageKey;
 use matrix_sdk_crypto::store::types::BackupDecryptionKey;
 use matrix_sdk_crypto::types::requests::AnyOutgoingRequest;
-use matrix_sdk_crypto::{EncryptionSettings, OlmMachine};
+use matrix_sdk_crypto::{EncryptionSettings, OlmMachine, OlmMachineBuilder};
 use ruma::events::AnyMessageLikeEventContent;
 use ruma::events::secret::request::SecretName;
 use ruma::serde::Raw;
@@ -1137,7 +1137,10 @@ impl DirectClient {
         let token = format!("token-{device}");
         hs.add_device(user, device, &token);
         let user_id = <&UserId>::try_from(user).unwrap();
-        let olm = OlmMachine::new(user_id, device.into()).await;
+        let olm = OlmMachineBuilder::new(user_id, device.into())
+            .build()
+            .await
+            .unwrap();
         Self {
             olm,
             token,

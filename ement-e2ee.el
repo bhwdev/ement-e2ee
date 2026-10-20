@@ -5,7 +5,7 @@
 ;; Author: Ben H. W. <foss@bhw.name>
 ;; Maintainer: Ben H. W. <foss@bhw.name>
 ;; URL: https://github.com/bhwdev/ement-e2ee
-;; Version: 0.18.0
+;; Version: 0.19.1
 ;; Package-Requires: ((emacs "28.1") (ement "0.16") (plz "0.7"))
 ;; Keywords: comm
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -77,7 +77,7 @@
   :link '(url-link "https://github.com/bhwdev/ement-e2ee")
   :prefix "ement-e2ee-")
 
-(defconst ement-e2ee-binary-version "0.18.0"
+(defconst ement-e2ee-binary-version "0.19.1"
   "The version of the ement-e2ee proxy this package is made for.
 A binary at least this new is accepted; `ement-e2ee-install' gets
 exactly this one.")

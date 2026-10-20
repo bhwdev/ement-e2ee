@@ -1,8 +1,7 @@
 use anyhow::Context as _;
-use matrix_sdk_crypto::OlmMachine;
 use matrix_sdk_crypto::types::requests::{AnyOutgoingRequest, OutgoingRequest, ToDeviceRequest};
+use matrix_sdk_crypto::{OlmMachine, OlmMachineBuilder};
 use matrix_sdk_sqlite::SqliteCryptoStore;
-use ruma::api::IncomingResponse;
 use ruma::api::client::{
     keys::{
         claim_keys::v3::Response as KeysClaimResponse, get_keys::v3::Response as KeysQueryResponse,
@@ -13,6 +12,7 @@ use ruma::api::client::{
     to_device::send_event_to_device::v3::Response as ToDeviceResponse,
 };
 use ruma::api::error::FromHttpResponseError;
+use ruma::api::{IncomingResponse, IncomingResponseExt as _};
 use ruma::events::MessageLikeEventContent as _;
 use ruma::{DeviceId, UserId};
 use serde_json::json;
@@ -44,7 +44,9 @@ pub async fn open_machine(
     let store = SqliteCryptoStore::open(&dir, config.store_passphrase.as_deref())
         .await
         .with_context(|| format!("failed to open crypto store at {}", dir.display()))?;
-    let olm = OlmMachine::with_store(user_id, device_id, store, None)
+    let olm = OlmMachineBuilder::new(user_id, device_id)
+        .with_crypto_store(std::sync::Arc::new(store))
+        .build()
         .await
         .context("failed to build OlmMachine")?;
     Ok(olm)

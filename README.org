@@ -82,7 +82,7 @@ It
 1. gets the proxy binary, after asking how: *download* the release's
    prebuilt binary (static Linux x86_64 and aarch64, Apple Silicon macOS),
    checked against the release's =SHA256SUMS= before it is used; or *build*
-   it with ~cargo install --locked~ (Rust ≥ 1.93), from the package's own
+   it with ~cargo install --locked~ (Rust ≥ 1.96), from the package's own
    checkout when its version matches. It goes to =ement-e2ee/VERSION/bin/=
    under ~user-emacs-directory~ (~ement-e2ee-binary-directory~). A new
    enough ~ement-e2ee~ on ~exec-path~, or ~ement-e2ee-program~, is used
@@ -152,7 +152,7 @@ serves one homeserver: route only accounts on the homeserver in its config.
 
 ** Without Emacs's help
 
-Build and install the binary by hand (Rust ≥ 1.93, ~rustup~ recommended). All
+Build and install the binary by hand (Rust ≥ 1.96, ~rustup~ recommended). All
 dependencies, including the
 [[https://github.com/matrix-org/matrix-rust-sdk][matrix-rust-sdk]] crates, are
 released versions from crates.io, locked by =Cargo.lock=.
@@ -356,7 +356,7 @@ Prefer keeping it; back it up if you care.
 
 #+begin_src sh
 cargo test          # unit tests plus end-to-end tests (see below)
-cargo +1.93 test --locked   # oldest Rust that Install promises
+cargo +1.96 test --locked   # oldest Rust that Install promises
 cargo run -- serve --homeserver https://matrix.org --log-level debug
 curl http://127.0.0.1:8009/_matrix/client/versions   # smoke test
 #+end_src
@@ -384,7 +384,7 @@ EMENT_E2EE_TEST_PROGRAM=target/debug/ement-e2ee \
 #+end_src
 
 CI (=.github/workflows/ci.yml=) runs ~cargo fmt~, clippy and the tests on
-stable and on Rust 1.93; then it byte-compiles the package with warnings as
+stable and on Rust 1.96; then it byte-compiles the package with warnings as
 errors and runs the ERT tests on Emacs 28.2, 29.4 and 30.2, and checkdoc and
 package-lint on 30.2.
 
@@ -392,7 +392,7 @@ package-lint on 30.2.
 
 The version follows
 [[https://github.com/matrix-org/matrix-rust-sdk/releases][matrix-rust-sdk]]'s:
-ement-e2ee 0.18.x is built on matrix-sdk-crypto 0.18.
+ement-e2ee 0.19.x is built on matrix-sdk-crypto 0.19.
 
 1. In one commit, set the same version in =Cargo.toml= (~version~, then
    ~cargo build~ to update =Cargo.lock=), in =ement-e2ee.el='s

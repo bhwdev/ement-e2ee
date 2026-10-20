@@ -23,7 +23,7 @@ use crate::crypto::device::STORE_FILE;
 /// does not export and which 0.18 left at 15 while migrating to 17.) Raise
 /// it with the matrix-sdk crates; `pinned_schema_is_matrix_sdk_sqlites`
 /// tells.
-pub const CRYPTO_STORE_SCHEMA: u8 = 17;
+pub const CRYPTO_STORE_SCHEMA: u8 = 19;
 
 const LOCK_FILE: &str = ".lock";
 const VERSION_FILE: &str = ".version";
