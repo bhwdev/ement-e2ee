@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_ement-e2ee");
 
-/// A port nothing listens on (released just now).
+/// A port nothing listens on (released just now): for a proxy to bind.
+/// Until it does, another test may draw the same port.
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -39,9 +40,21 @@ fn write_config(path: &Path, port: u16, homeserver: &str, store_dir: &Path, extr
     .unwrap();
 }
 
+/// A port where connections are refused, until the tests end: bound, so
+/// no other test can take it, but not listening.
+fn closed_port() -> u16 {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket
+        .bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())
+        .unwrap();
+    let port = socket.local_addr().unwrap().as_socket().unwrap().port();
+    std::mem::forget(socket);
+    port
+}
+
 /// A homeserver URL where nothing answers.
 fn offline_homeserver() -> String {
-    format!("http://127.0.0.1:{}", free_port())
+    format!("http://127.0.0.1:{}", closed_port())
 }
 
 /// Run `serve --config CONFIG`, expecting it to give up by itself;
@@ -79,24 +92,53 @@ fn serve_until_exit(config: &Path) -> (std::process::ExitStatus, String) {
 
 /// GET `path` from 127.0.0.1:`port`; returns the status code and body.
 fn http_get(port: u16, path: &str) -> (u16, String) {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    try_http_get(port, path).unwrap_or_else(|e| panic!("GET {path} on port {port}: {e}"))
+}
+
+/// `http_get`, for a port where anything, or nothing, may answer.
+fn try_http_get(port: u16, path: &str) -> std::io::Result<(u16, String)> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     write!(
         stream,
         "GET {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n"
-    )
-    .unwrap();
+    )?;
     let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    stream.read_to_string(&mut response)?;
     let status = response
         .split(' ')
         .nth(1)
         .and_then(|code| code.parse().ok())
-        .unwrap_or_else(|| panic!("not an HTTP response: {response}"));
+        .ok_or_else(|| std::io::Error::other(format!("not an HTTP response: {response}")))?;
     let body = response
         .split_once("\r\n\r\n")
         .map(|(_, body)| body.to_owned())
         .unwrap_or_default();
-    (status, body)
+    Ok((status, body))
+}
+
+/// Wait until `child` serves on `port` (true) or exits (false). An open
+/// port does not tell: `free_port` only found it free, and until `child`
+/// binds it a concurrent test may draw the same port and start its proxy
+/// there. So wait for the version route to give `child`'s pid.
+fn wait_until_serving(child: &mut Child, port: u16) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return false;
+        }
+        if let Ok((200, body)) = try_http_get(port, "/_ement/version") {
+            let version: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            if version["pid"] == child.id() {
+                return true;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the proxy did not start listening"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 impl Proxy {
@@ -109,39 +151,48 @@ impl Proxy {
     /// the test holds, like Emacs does.
     fn start_with(homeserver: &str, extra_config: &str, serve_args: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let port = free_port();
         let config = dir.path().join("config.toml");
-        write_config(
-            &config,
-            port,
-            homeserver,
-            &dir.path().join("store"),
-            extra_config,
-        );
-        let child = Command::new(BIN)
-            .args(["serve", "--config"])
-            .arg(&config)
-            .args(serve_args)
-            .env_remove("RUST_LOG")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(
-                Instant::now() < deadline,
-                "the proxy did not start listening"
+        // Another port if a concurrent test's proxy got this one first.
+        for _ in 0..5 {
+            let port = free_port();
+            write_config(
+                &config,
+                port,
+                homeserver,
+                &dir.path().join("store"),
+                extra_config,
             );
-            std::thread::sleep(Duration::from_millis(20));
+            let mut child = Command::new(BIN)
+                .args(["serve", "--config"])
+                .arg(&config)
+                .args(serve_args)
+                .env_remove("RUST_LOG")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            if wait_until_serving(&mut child, port) {
+                return Self {
+                    child,
+                    config,
+                    port,
+                    dir,
+                };
+            }
+            let mut error = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut error)
+                .unwrap();
+            assert!(
+                error.contains("failed to bind"),
+                "the proxy did not start: {error}"
+            );
         }
-        Self {
-            child,
-            config,
-            port,
-            dir,
-        }
+        panic!("the proxy found no free port");
     }
 
     /// Start with a homeserver URL where nothing answers.
@@ -287,8 +338,6 @@ fn second_proxy_on_the_same_store_is_refused() {
         )),
         "{error}"
     );
-    // It gave up before binding its port.
-    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
     // The first one is unharmed.
     assert_eq!(http_get(proxy.port, "/_ement/version").0, 200);
 }
@@ -311,7 +360,6 @@ fn newer_store_marker_refuses_to_start() {
         )),
         "{error}"
     );
-    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
     // An older marker is raised to this version.
     std::fs::write(store.join(".version"), "0.0.1\n").unwrap();
     let marker = {
@@ -321,11 +369,9 @@ fn newer_store_marker_refuses_to_start() {
             .stdout(Stdio::null())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(Instant::now() < deadline, "did not start");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        // It raises the marker before it binds: even if a concurrent test
+        // has taken the port, the marker is there once it serves or exits.
+        wait_until_serving(&mut child, port);
         let marker = std::fs::read_to_string(store.join(".version")).unwrap();
         let _ = child.kill();
         let _ = child.wait();
@@ -360,7 +406,6 @@ fn newer_crypto_store_schema_refuses_to_start() {
         "{error}"
     );
     assert!(error.contains("@me:example.org/DEVICE"), "{error}");
-    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
 }
 
 #[test]
@@ -512,7 +557,7 @@ fn ctl_says_when_no_proxy_is_running() {
         .args([
             "ctl",
             "--proxy",
-            &format!("http://127.0.0.1:{}", free_port()),
+            &format!("http://127.0.0.1:{}", closed_port()),
             "status",
         ])
         .output()

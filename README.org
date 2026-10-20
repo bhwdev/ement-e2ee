@@ -2,13 +2,9 @@
 #+options: ^:{}
 
 A transparent end-to-end-encryption proxy that gives the Emacs Matrix client
-[[https://github.com/alphapapa/ement.el][ement.el]] full E2EE support — without
-modifying ement at all. It is a Rust reimplementation of the role the deprecated
-[[https://github.com/matrix-org/pantalaimon][pantalaimon]] plays in ement's
-README, built on the official
-[[https://github.com/matrix-org/matrix-rust-sdk][matrix-sdk-crypto]] (vodozemac;
-the same crypto core Element uses) instead of the deprecated libolm
-(which pantalaimon was based on).
+[[https://github.com/alphapapa/ement.el][ement.el]] full E2EE support — without modifying ement at all. It uses the
+official [[https://github.com/matrix-org/matrix-rust-sdk][matrix-sdk-crypto]] (vodozemac; the same crypto core Element uses)
+instead of the deprecated libolm (which pantalaimon was based on).
 
 The Emacs package =ement-e2ee.el=, in this repository, installs the proxy,
 runs it while ement needs it and routes ement through it: after
@@ -157,8 +153,9 @@ dependencies, including the
 [[https://github.com/matrix-org/matrix-rust-sdk][matrix-rust-sdk]] crates, are
 released versions from crates.io, locked by =Cargo.lock=.
 
-Rust older than 1.96 (Guix has 1.93) cannot build 0.19: take the binary and
-the package from the =v0.18.0= tag. That refuses a store 0.19 has used.
+Rust older than 1.96 (Guix has 1.93) cannot build 0.19 (upstream dependency):
+checkout =v0.18.0= or use a static prebuilt binary. That refuses a store 0.19
+has used.
 
 #+begin_src sh
 cargo install --locked --path .   # puts ement-e2ee on ~/.cargo/bin

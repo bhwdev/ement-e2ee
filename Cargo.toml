@@ -37,6 +37,7 @@ bytes = "1"
 percent-encoding = "2"
 
 [dev-dependencies]
+socket2 = "0.6"
 tempfile = "3"
 
 # Release binaries (CI): `cargo build --profile dist`.
