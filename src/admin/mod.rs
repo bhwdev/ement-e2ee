@@ -78,7 +78,7 @@ pub async fn handle(state: &AppState, sub: &str, req: Request) -> Result<Respons
         ("GET", ["verify"]) => {
             let (ctx, with_user) = match verify_target(state, &query).await {
                 Ok(t) => t,
-                Err(response) => return Ok(response),
+                Err(response) => return Ok(*response),
             };
             Ok(Json(crate::crypto::verify::list(&ctx, &with_user).await).into_response())
         }
@@ -87,7 +87,7 @@ pub async fn handle(state: &AppState, sub: &str, req: Request) -> Result<Respons
             let params = json_params(&body);
             let (ctx, _) = match verify_target(state, &params).await {
                 Ok(t) => t,
-                Err(response) => return Ok(response),
+                Err(response) => return Ok(*response),
             };
             let Some(device_id) = params.get("device_id").cloned() else {
                 return Ok(json_error(StatusCode::BAD_REQUEST, "missing device_id"));
@@ -98,7 +98,7 @@ pub async fn handle(state: &AppState, sub: &str, req: Request) -> Result<Respons
             let flow = (*flow).to_owned();
             let (ctx, with_user) = match verify_target(state, &query).await {
                 Ok(t) => t,
-                Err(response) => return Ok(response),
+                Err(response) => return Ok(*response),
             };
             verify_result(crate::crypto::verify::show(&ctx, &with_user, &flow).await)
         }
@@ -109,7 +109,7 @@ pub async fn handle(state: &AppState, sub: &str, req: Request) -> Result<Respons
             let params = json_params(&body);
             let (ctx, with_user) = match verify_target(state, &params).await {
                 Ok(t) => t,
-                Err(response) => return Ok(response),
+                Err(response) => return Ok(*response),
             };
             use crate::crypto::verify;
             let result = match action.as_str() {
@@ -176,12 +176,12 @@ async fn debug(
         ("GET", ["report"]) => Ok(Json(diagnose::report(state).await).into_response()),
         ("GET", ["session"]) => match session().await {
             Ok(ctx) => Ok(Json(diagnose::session(state, &ctx).await).into_response()),
-            Err(response) => Ok(response),
+            Err(response) => Ok(*response),
         },
         ("GET", ["devices"]) => {
             let ctx = match session().await {
                 Ok(ctx) => ctx,
-                Err(response) => return Ok(response),
+                Err(response) => return Ok(*response),
             };
             let user = match query.get("user") {
                 Some(user) => match diagnose::parse_user(&decode(user)) {
@@ -198,7 +198,7 @@ async fn debug(
             };
             match session().await {
                 Ok(ctx) => Ok(answer(diagnose::room(&ctx, &room_id).await)),
-                Err(response) => Ok(response),
+                Err(response) => Ok(*response),
             }
         }
         ("GET", ["event", room_id, event_id]) => {
@@ -207,7 +207,7 @@ async fn debug(
             };
             match session().await {
                 Ok(ctx) => Ok(answer(diagnose::event(&ctx, &room_id, event_id).await)),
-                Err(response) => Ok(response),
+                Err(response) => Ok(*response),
             }
         }
         ("GET", ["logs"]) => {
@@ -273,14 +273,14 @@ fn json_params(body: &serde_json::Value) -> std::collections::HashMap<String, St
 async fn verify_target(
     state: &AppState,
     params: &std::collections::HashMap<String, String>,
-) -> Result<(Arc<AccountContext>, ruma::OwnedUserId), Response> {
+) -> Result<(Arc<AccountContext>, ruma::OwnedUserId), Box<Response>> {
     let ctx = resolve_session(state, params.get("user_id").map(String::as_str)).await?;
     let with_user = match params.get("with_user") {
         Some(user) => user.parse().map_err(|_| {
-            json_error(
+            Box::new(json_error(
                 StatusCode::BAD_REQUEST,
                 format!("invalid with_user: {user}"),
-            )
+            ))
         })?,
         None => ctx.user_id.clone(),
     };
@@ -310,29 +310,29 @@ async fn read_json_body(req: Request) -> Result<serde_json::Value, ProxyError> {
 pub async fn resolve_session(
     state: &AppState,
     user_id: Option<&str>,
-) -> Result<Arc<AccountContext>, Response> {
+) -> Result<Arc<AccountContext>, Box<Response>> {
     let sessions = state.sessions.list().await;
     match user_id {
         Some(user_id) => sessions
             .into_iter()
             .find(|ctx| ctx.user_id.as_str() == user_id)
             .ok_or_else(|| {
-                json_error(
+                Box::new(json_error(
                     StatusCode::NOT_FOUND,
                     format!("no active session for {user_id}"),
-                )
+                ))
             }),
         None => match sessions.len() {
-            0 => Err(json_error(
+            0 => Err(Box::new(json_error(
                 StatusCode::CONFLICT,
                 match state.sessions.refused().first() {
                     // ement did connect; say why that was not enough.
                     Some(conflict) => format!("no active sessions: {conflict}"),
                     None => "no active sessions — connect ement through the proxy first".to_owned(),
                 },
-            )),
+            ))),
             1 => Ok(sessions.into_iter().next().unwrap()),
-            _ => Err(json_error(
+            _ => Err(Box::new(json_error(
                 StatusCode::CONFLICT,
                 format!(
                     "multiple sessions active, pass user_id: {}",
@@ -342,7 +342,7 @@ pub async fn resolve_session(
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-            )),
+            ))),
         },
     }
 }
@@ -390,7 +390,7 @@ async fn keys_export(state: &AppState, body: serde_json::Value) -> Result<Respon
     };
     let ctx = match resolve_session(state, body.get("user_id").and_then(|v| v.as_str())).await {
         Ok(ctx) => ctx,
-        Err(response) => return Ok(response),
+        Err(response) => return Ok(*response),
     };
     let keys = ctx
         .olm
@@ -417,7 +417,7 @@ async fn keys_import(state: &AppState, body: serde_json::Value) -> Result<Respon
     };
     let ctx = match resolve_session(state, body.get("user_id").and_then(|v| v.as_str())).await {
         Ok(ctx) => ctx,
-        Err(response) => return Ok(response),
+        Err(response) => return Ok(*response),
     };
     let keys = match matrix_sdk_crypto::decrypt_room_key_export(data.as_bytes(), passphrase) {
         Ok(keys) => keys,
@@ -452,7 +452,7 @@ async fn bootstrap(state: &AppState, body: serde_json::Value) -> Result<Response
 
     let ctx = match resolve_session(state, user_id).await {
         Ok(ctx) => ctx,
-        Err(response) => return Ok(response),
+        Err(response) => return Ok(*response),
     };
 
     match crate::crypto::ssss::bootstrap(&ctx, recovery_key).await {
