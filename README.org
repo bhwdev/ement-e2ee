@@ -157,6 +157,9 @@ dependencies, including the
 [[https://github.com/matrix-org/matrix-rust-sdk][matrix-rust-sdk]] crates, are
 released versions from crates.io, locked by =Cargo.lock=.
 
+Rust older than 1.96 (Guix has 1.93) cannot build 0.19: take the binary and
+the package from the =v0.18.0= tag. That refuses a store 0.19 has used.
+
 #+begin_src sh
 cargo install --locked --path .   # puts ement-e2ee on ~/.cargo/bin
 #+end_src
