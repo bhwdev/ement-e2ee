@@ -277,7 +277,7 @@ whose text is SUMS if given."
     (cl-letf (((symbol-function 'ement-e2ee--checkout) #'ignore))
       (should (equal (split-string-shell-command (ement-e2ee--build-command "/bin/cargo"))
                      '("/bin/cargo" "install" "--locked" "--root" "/managed/0.18.0"
-                       "--git" "https://github.com/bhw-foss/ement-e2ee" "--tag" "v0.18.0"))))))
+                       "--git" "https://github.com/bhwdev/ement-e2ee" "--tag" "v0.18.0"))))))
 
 (ert-deftest ement-e2ee-test-checkout-must-match-the-version ()
   ;; This repository is a checkout; whether it counts depends on its

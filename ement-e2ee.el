@@ -4,7 +4,7 @@
 
 ;; Author: Ben H. W. <foss@bhw.name>
 ;; Maintainer: Ben H. W. <foss@bhw.name>
-;; URL: https://github.com/bhw-foss/ement-e2ee
+;; URL: https://github.com/bhwdev/ement-e2ee
 ;; Version: 0.18.0
 ;; Package-Requires: ((emacs "28.1") (ement "0.16") (plz "0.7"))
 ;; Keywords: comm
@@ -74,7 +74,7 @@
 (defgroup ement-e2ee nil
   "End-to-end encryption for ement.el, through the ement-e2ee proxy."
   :group 'ement
-  :link '(url-link "https://github.com/bhw-foss/ement-e2ee")
+  :link '(url-link "https://github.com/bhwdev/ement-e2ee")
   :prefix "ement-e2ee-")
 
 (defconst ement-e2ee-binary-version "0.18.0"
@@ -141,7 +141,7 @@ may wait for a passphrase prompt, so leave time for that."
   :type '(repeat string))
 
 (defcustom ement-e2ee-release-url
-  "https://github.com/bhw-foss/ement-e2ee/releases/download/v%s/"
+  "https://github.com/bhwdev/ement-e2ee/releases/download/v%s/"
   "Where `ement-e2ee-install' downloads prebuilt binaries from.
 A format string for the version.  The files ement-e2ee-TARGET
 and SHA256SUMS are fetched from under it."
@@ -149,7 +149,7 @@ and SHA256SUMS are fetched from under it."
 
 ;;;; Variables
 
-(defconst ement-e2ee--repository "https://github.com/bhw-foss/ement-e2ee"
+(defconst ement-e2ee--repository "https://github.com/bhwdev/ement-e2ee"
   "The source repository, for building with cargo.")
 
 (defconst ement-e2ee--prebuilt-targets

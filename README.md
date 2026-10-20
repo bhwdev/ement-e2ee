@@ -58,16 +58,16 @@ Install it from Git, with whichever package manager you use (it needs Emacs
 
 ```elisp
 ;; package-vc (Emacs 29+)
-(package-vc-install "https://github.com/bhw-foss/ement-e2ee")
+(package-vc-install "https://github.com/bhwdev/ement-e2ee")
 ;; or, Emacs 30+:
 (use-package ement-e2ee
-  :vc (:url "https://github.com/bhw-foss/ement-e2ee"))
+  :vc (:url "https://github.com/bhwdev/ement-e2ee"))
 
 ;; straight.el
-(straight-use-package '(ement-e2ee :host github :repo "bhw-foss/ement-e2ee"))
+(straight-use-package '(ement-e2ee :host github :repo "bhwdev/ement-e2ee"))
 
 ;; elpaca
-(elpaca (ement-e2ee :host github :repo "bhw-foss/ement-e2ee"))
+(elpaca (ement-e2ee :host github :repo "bhwdev/ement-e2ee"))
 ```
 
 Then, once:
@@ -101,7 +101,7 @@ The prebuilt binaries carry a build-provenance attestation, which ties them
 to the release workflow run that built them:
 
 ```sh
-gh attestation verify ement-e2ee-x86_64-unknown-linux-musl -R bhw-foss/ement-e2ee
+gh attestation verify ement-e2ee-x86_64-unknown-linux-musl -R bhwdev/ement-e2ee
 ```
 
 Elsewhere (Intel macOS, other Unix systems) `ement-e2ee-install` offers the
@@ -404,7 +404,7 @@ Whoever installs the package from Git (package-vc, straight, elpaca, MELPA
 unstable) follows the main branch, so the elisp there must always work with
 the binary its `ement-e2ee-binary-version` names: raise it only in a release
 commit. MELPA takes the recipe
-`(ement-e2ee :fetcher github :repo "bhw-foss/ement-e2ee" :files ("ement-e2ee.el"))`.
+`(ement-e2ee :fetcher github :repo "bhwdev/ement-e2ee" :files ("ement-e2ee.el"))`.
 
 ## Licence
 
