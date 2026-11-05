@@ -65,6 +65,8 @@
 (declare-function ement-session-server "ement-structs" (session))
 (declare-function ement-user-id "ement-structs" (user))
 (declare-function ement-server-uri-prefix "ement-structs" (server))
+(declare-function ement-server-name "ement-structs" (server))
+(declare-function ement--hostname-uri "ement" (hostname))
 (declare-function ement-room-sync "ement-room" (session &optional force))
 (declare-function compilation-start "compile"
                   (command &optional mode name-function highlight-regexp continue))
@@ -119,7 +121,10 @@ nil: signal an error that points to `ement-e2ee-install'."
   "Which accounts `ement-connect' routes through the proxy.
 t means all of them; otherwise a list of Matrix user IDs, like
 \(\"@you:example.org\").  The proxy serves the one homeserver its
-config names, so route only accounts on that server."
+config names, so route only accounts on that server.
+
+An account left out connects to its homeserver directly, even
+when ement saved its session while it was routed."
   :type '(choice (const :tag "All accounts" t)
                  (repeat :tag "These user IDs" string)))
 
@@ -1060,11 +1065,42 @@ connect again once that is done"))))))))
     (ement-e2ee--ensure-config program user-id)
     (ement-e2ee--ensure)))
 
+(defun ement-e2ee--proxy-url ()
+  "Return the proxy's base URL, or nil if there is no telling.
+Without a proxy yet in this Emacs, ask the config, if the binary is there."
+  (or ement-e2ee--url
+      (ignore-errors
+        (and-let* ((program (ement-e2ee--locate-binary)))
+          (alist-get 'url (ement-e2ee--info program))))))
+
+(defun ement-e2ee--unroute (session)
+  "Point ement's SESSION at its homeserver if it names the proxy.
+ement saves the URI prefix with a session: one saved while its
+account was routed still names the proxy after
+`ement-e2ee-accounts' has stopped routing it."
+  (let* ((server (ement-session-server session))
+         (prefix (ement-server-uri-prefix server)))
+    ;; The proxy's URL is plain http, a homeserver's hardly ever: only
+    ;; then is the config worth asking.
+    (when (and (stringp prefix)
+               (string-prefix-p "http://" prefix)
+               (equal prefix (ement-e2ee--proxy-url)))
+      (let ((uri (ement--hostname-uri (ement-server-name server))))
+        ;; When discovery fails, ement settles for a bare hostname, which
+        ;; curl would take for plain http.
+        (unless (string-match-p "\\`https?://" uri)
+          (setq uri (concat "https://" uri)))
+        (message "Ement-e2ee: %s is not in `ement-e2ee-accounts'; connecting it to %s directly"
+                 (ement-user-id (ement-session-user session)) uri)
+        (aset server (cl-struct-slot-offset 'ement-server 'uri-prefix) uri)))))
+
 (defun ement-e2ee--connect-advice (connect &rest args)
   "Have CONNECT, `ement-connect', called with ARGS, go through the proxy.
 For accounts `ement-e2ee-accounts' routes, start the proxy if
 need be and use it as the server's URI prefix, overriding any
-:uri-prefix given and the one a saved session has."
+:uri-prefix given and the one a saved session has.  Point a saved
+session of any other account that names the proxy back at its
+homeserver."
   (ement-e2ee--add-hooks)
   (let* ((session (plist-get args :session))
          (user-id (if session
@@ -1075,7 +1111,10 @@ need be and use it as the server's URI prefix, overriding any
       (setq user-id (read-string "User ID: " nil 'ement-connect-user-id-history)
             args (plist-put (copy-sequence args) :user-id user-id)))
     (if (not (ement-e2ee--routed-p user-id))
-        (apply connect args)
+        (progn
+          (when session
+            (ement-e2ee--unroute session))
+          (apply connect args))
       (let ((url (ement-e2ee--prepare user-id)))
         (if session
             (let ((server (ement-session-server session)))

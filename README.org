@@ -133,6 +133,8 @@ cargo build only. Native Windows is not supported; WSL is.
   new proxy answers, the older binaries under ~ement-e2ee-binary-directory~
   are deleted: it has marked the store as its own, so they would refuse to
   start there anyway. The config, and the store with its device, are kept.
+- For multi-account support: see ement-e2ee-accounts. This defaults to 't' but
+  can take an alist of accounts you want to route through the proxy.
 
 Commands:
 

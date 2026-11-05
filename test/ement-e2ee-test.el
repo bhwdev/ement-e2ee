@@ -531,6 +531,68 @@ Content-Length: %d\r\nConnection: close\r\n\r\n%s"
       (should (equal (ement-server-uri-prefix (ement-session-server session))
                      "https://matrix.example.org")))))
 
+(ert-deftest ement-e2ee-test-advice-unroutes-a-saved-session ()
+  ;; Saved while routed, the session names the proxy; its account is not
+  ;; routed any more.
+  (ement-e2ee-test--with-state
+    (let ((ement-e2ee-accounts '("@someone-else:example.org"))
+          (ement-e2ee--url "http://127.0.0.1:9999")
+          (session (ement-e2ee-test--session "@me:example.org" "http://127.0.0.1:9999"))
+          discovered synced)
+      (cl-letf (((symbol-function 'ement-e2ee--prepare)
+                 (lambda (_) (error "Prepared a proxy for an account not routed")))
+                ((symbol-function 'ement--hostname-uri)
+                 (lambda (name) (setq discovered name) "https://matrix.example.org"))
+                ((symbol-function 'ement--sync) (lambda (session &rest _) (setq synced session))))
+        (ement-e2ee-mode 1)
+        (unwind-protect
+            (ement-connect :session session)
+          (ement-e2ee-mode -1)))
+      (should (equal discovered "example.org"))
+      (should (eq synced session))
+      (should (equal (ement-server-uri-prefix (ement-session-server session))
+                     "https://matrix.example.org")))))
+
+(ert-deftest ement-e2ee-test-advice-unroutes-by-the-config ()
+  ;; No proxy in this Emacs yet: the config says where it would listen.
+  ;; A failed discovery's bare hostname still makes an https URL.
+  (ement-e2ee-test--with-state
+    (let ((ement-e2ee-accounts '("@someone-else:example.org"))
+          (session (ement-e2ee-test--session "@me:example.org" "http://127.0.0.1:8009")))
+      (cl-letf (((symbol-function 'ement-e2ee--locate-binary) (lambda () "ement-e2ee"))
+                ((symbol-function 'ement-e2ee--info)
+                 (lambda (_) '((url . "http://127.0.0.1:8009"))))
+                ((symbol-function 'ement--hostname-uri) (lambda (name) name))
+                ((symbol-function 'ement--sync) #'ignore))
+        (ement-e2ee-mode 1)
+        (unwind-protect
+            (ement-connect :session session)
+          (ement-e2ee-mode -1)))
+      (should (equal (ement-server-uri-prefix (ement-session-server session))
+                     "https://example.org"))
+      (should-not ement-e2ee--url))))
+
+(ert-deftest ement-e2ee-test-advice-unroutes-only-the-proxy ()
+  ;; Another local server (pantalaimon, a homeserver under test), or no
+  ;; proxy installed to say where it listens: the session is left alone.
+  (ement-e2ee-test--with-state
+    (let ((ement-e2ee-accounts '("@someone-else:example.org")))
+      (pcase-dolist (`(,prefix . ,binary) '(("http://localhost:8008" . "ement-e2ee")
+                                            ("http://127.0.0.1:8009" . nil)))
+        (let ((session (ement-e2ee-test--session "@me:example.org" prefix)))
+          (cl-letf (((symbol-function 'ement-e2ee--locate-binary) (lambda () binary))
+                    ((symbol-function 'ement-e2ee--info)
+                     (lambda (_) '((url . "http://127.0.0.1:8009"))))
+                    ((symbol-function 'ement--hostname-uri)
+                     (lambda (_) (error "Discovered a homeserver for %s" prefix)))
+                    ((symbol-function 'ement--sync) #'ignore))
+            (ement-e2ee-mode 1)
+            (unwind-protect
+                (ement-connect :session session)
+              (ement-e2ee-mode -1)))
+          (should (equal (ement-server-uri-prefix (ement-session-server session))
+                         prefix)))))))
+
 (ert-deftest ement-e2ee-test-mode-off-removes-the-advice ()
   (ement-e2ee-mode 1)
   (ement-e2ee-mode -1)
