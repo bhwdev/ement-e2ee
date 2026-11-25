@@ -1,10 +1,9 @@
 #+title: ement-e2ee
 #+options: ^:{}
 
-A transparent end-to-end-encryption proxy that gives the Emacs Matrix client
-[[https://github.com/alphapapa/ement.el][ement.el]] full E2EE support — without modifying ement at all. It uses the
-official [[https://github.com/matrix-org/matrix-rust-sdk][matrix-sdk-crypto]] (vodozemac; the same crypto core Element uses)
-instead of the deprecated libolm (which pantalaimon was based on).
+Enables full end-to-end encryption support for Emacs Matrix client [[https://github.com/alphapapa/ement.el][ement.el]]. It
+uses the official [[https://github.com/matrix-org/matrix-rust-sdk][matrix-sdk-crypto]] (vodozemac; the same crypto core Element
+uses) instead of the deprecated libolm (which pantalaimon was based on).
 
 The Emacs package =ement-e2ee.el=, in this repository, installs the proxy,
 runs it while ement needs it and routes ement through it: after
