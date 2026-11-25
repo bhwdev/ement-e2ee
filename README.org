@@ -162,9 +162,9 @@ dependencies, including the
 [[https://github.com/matrix-org/matrix-rust-sdk][matrix-rust-sdk]] crates, are
 released versions from crates.io, locked by =Cargo.lock=.
 
-Rust older than 1.96 (Guix has 1.93) cannot build 0.19 (upstream dependency):
+Rust older than 1.96 cannot build 0.19 or later (upstream dependency):
 checkout =v0.18.0= or use a static prebuilt binary. That refuses a store 0.19
-has used.
+or later has used.
 
 #+begin_src sh
 cargo install --locked --path .   # puts ement-e2ee on ~/.cargo/bin
@@ -429,7 +429,7 @@ package-lint on 30.2.
 
 The version follows
 [[https://github.com/matrix-org/matrix-rust-sdk/releases][matrix-rust-sdk]]'s:
-ement-e2ee 0.19.x is built on matrix-sdk-crypto 0.19.
+ement-e2ee 0.20.x is built on matrix-sdk-crypto 0.20.
 
 1. In one commit, set the same version in =Cargo.toml= (~version~, then
    ~cargo build~ to update =Cargo.lock=), in =ement-e2ee.el='s
